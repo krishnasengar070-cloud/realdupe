@@ -45,13 +45,11 @@ if not BOT_TOKEN:
 ADMIN_USERNAME = "pvnuo"
 DAILY_FREE_LIMIT = 5
 DB_FILE = "bot_data.db"
-LIFETIME_FREE_FILE = "lifetime_free.json"   # permanent backup
+LIFETIME_FREE_FILE = "lifetime_free.json"
 
-# Temporary hard-coded lifetime free (emergency only)
 HARDCODED_LIFETIME_FREE = [
     # example:
     # 123456789,
-    # 987654321,
 ]
 # ====================================================
 
@@ -78,7 +76,6 @@ def save_lifetime_free_json(user_ids: list):
         print(f"lifetime_free.json save error: {e}", flush=True)
 
 def sync_lifetime_free_from_json():
-    """On startup: put all JSON users into DB so they survive updates."""
     ids = load_lifetime_free_json()
     if not ids:
         return
@@ -124,7 +121,6 @@ def init_db():
     c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('global_free', '0')")
     conn.commit()
     conn.close()
-    # restore permanent free users after any DB wipe / update
     sync_lifetime_free_from_json()
 
 def is_global_free() -> bool:
@@ -159,7 +155,6 @@ def add_lifetime_free(user_id: int):
     c.execute("INSERT OR IGNORE INTO lifetime_free (user_id) VALUES (?)", (user_id,))
     conn.commit()
     conn.close()
-    # also save permanently in JSON
     ids = load_lifetime_free_json()
     if user_id not in ids:
         ids.append(user_id)
@@ -171,7 +166,6 @@ def remove_lifetime_free(user_id: int):
     c.execute("DELETE FROM lifetime_free WHERE user_id = ?", (user_id,))
     conn.commit()
     conn.close()
-    # also remove from JSON
     ids = load_lifetime_free_json()
     ids = [x for x in ids if x != user_id]
     save_lifetime_free_json(ids)
@@ -255,7 +249,7 @@ def can_use_bot(user_id: int, username: str = None) -> tuple[bool, str]:
     if used < DAILY_FREE_LIMIT:
         return True, ""
     return False, (
-        "You have used all 5 free links for today.\n"
+        "You have used all 5 free actions for today.\n"
         "Please try again tomorrow or contact @pvnuo for unlimited access.\n\n"
         "Or buy unlimited access:\n"
         "👉 /buy"
@@ -286,42 +280,50 @@ def enhance_image(image: Image.Image) -> Image.Image:
         image = image.convert("RGB")
 
     original_size = image.size
+    w, h = original_size
+
+    # slight random crop (1-2.5%) then resize back
+    crop_pct = random.uniform(0.01, 0.025)
+    left = int(w * crop_pct * random.uniform(0.3, 0.7))
+    top = int(h * crop_pct * random.uniform(0.3, 0.7))
+    right = w - int(w * crop_pct * random.uniform(0.3, 0.7))
+    bottom = h - int(h * crop_pct * random.uniform(0.3, 0.7))
+    image = image.crop((left, top, right, bottom)).resize(original_size, Image.Resampling.LANCZOS)
 
     data = list(image.getdata())
     clean = Image.new(image.mode, image.size)
     clean.putdata(data)
 
-    angle = random.uniform(0.04, 0.12) * random.choice([-1, 1])
+    angle = random.uniform(0.03, 0.09) * random.choice([-1, 1])
     clean = clean.rotate(angle, resample=Image.Resampling.BICUBIC, expand=False)
     clean = clean.rotate(-angle, resample=Image.Resampling.BICUBIC, expand=False)
 
-    w, h = clean.size
-    factor = random.uniform(0.993, 0.998)
+    factor = random.uniform(0.994, 0.998)
     clean = clean.resize((int(w * factor), int(h * factor)), Image.Resampling.LANCZOS)
     clean = clean.resize(original_size, Image.Resampling.LANCZOS)
 
-    noise = Image.effect_noise(clean.size, random.uniform(2.5, 4.5))
+    noise = Image.effect_noise(clean.size, random.uniform(2.0, 4.0))
     noise = noise.convert("L")
-    noise = ImageEnhance.Brightness(noise).enhance(random.uniform(0.08, 0.15))
-    clean = Image.blend(clean, noise.convert("RGB"), random.uniform(0.04, 0.08))
+    noise = ImageEnhance.Brightness(noise).enhance(random.uniform(0.07, 0.13))
+    clean = Image.blend(clean, noise.convert("RGB"), random.uniform(0.03, 0.07))
 
     r, g, b = clean.split()
-    r = ImageEnhance.Brightness(r).enhance(random.uniform(0.985, 1.015))
-    g = ImageEnhance.Brightness(g).enhance(random.uniform(0.985, 1.015))
-    b = ImageEnhance.Brightness(b).enhance(random.uniform(0.985, 1.015))
+    r = ImageEnhance.Brightness(r).enhance(random.uniform(0.988, 1.012))
+    g = ImageEnhance.Brightness(g).enhance(random.uniform(0.988, 1.012))
+    b = ImageEnhance.Brightness(b).enhance(random.uniform(0.988, 1.012))
     clean = Image.merge("RGB", (r, g, b))
 
     clean = clean.filter(ImageFilter.UnsharpMask(
-        radius=random.uniform(0.9, 1.4),
-        percent=random.randint(80, 120),
+        radius=random.uniform(0.8, 1.3),
+        percent=random.randint(70, 110),
         threshold=1
     ))
 
     enhancer = ImageEnhance.Contrast(clean)
-    clean = enhancer.enhance(random.uniform(1.04, 1.12))
+    clean = enhancer.enhance(random.uniform(1.03, 1.09))
 
     enhancer = ImageEnhance.Color(clean)
-    clean = enhancer.enhance(random.uniform(0.97, 1.06))
+    clean = enhancer.enhance(random.uniform(0.98, 1.04))
 
     temp = io.BytesIO()
     clean.save(temp, format="PNG", optimize=True)
@@ -329,14 +331,14 @@ def enhance_image(image: Image.Image) -> Image.Image:
     clean = Image.open(temp).convert("RGB")
 
     out = io.BytesIO()
-    clean.save(out, format="JPEG", quality=96, optimize=True, progressive=True, subsampling=0)
+    clean.save(out, format="JPEG", quality=random.randint(94, 97), optimize=True, progressive=True, subsampling=0)
     out.seek(0)
     clean = Image.open(out).convert("RGB")
 
     return clean
 
 # ------------------------------------------------------
-# Video enhance (trim 0.6s + very mild unique)
+# Video enhance — stronger unique (crop + speed + fps + mild look)
 # ------------------------------------------------------
 def enhance_video(input_path: str, output_path: str) -> bool:
     if not shutil.which("ffmpeg"):
@@ -356,24 +358,48 @@ def enhance_video(input_path: str, output_path: str) -> bool:
         print(f"ffprobe failed: {e}", flush=True)
         duration = 0.0
 
-    trim_start = 0.6
-    trim_end = 0.6
-    if duration > (trim_start + trim_end + 2.0):
+    # trim 0.5-0.7s from start and end if long enough
+    trim_start = random.uniform(0.5, 0.7)
+    trim_end = random.uniform(0.5, 0.7)
+    if duration > (trim_start + trim_end + 2.5):
         ss = trim_start
         t = duration - trim_start - trim_end
     else:
         ss = 0.0
         t = max(duration, 0.1)
 
+    # micro speed change (very hard for hash systems)
+    speed = random.uniform(0.978, 1.022)
+    setpts = 1.0 / speed
+
+    # random slight crop (1.2% - 2.8%)
+    crop_pct = random.uniform(0.012, 0.028)
+    # we use relative crop in filter
+
+    # force a slightly different fps sometimes
+    target_fps = random.choice([29.97, 30, 25, 24, 23.976])
+
+    # mild visual only (no pink)
+    contrast = random.uniform(1.015, 1.04)
+    brightness = random.uniform(-0.005, 0.008)
+    saturation = random.uniform(0.99, 1.025)
+    noise_str = random.randint(2, 5)
+
     vf = (
         f"trim=start={ss}:duration={t},"
-        "setpts=PTS-STARTPTS,"
-        "scale=trunc(iw/2)*2:trunc(ih/2)*2,"
-        "eq=contrast=1.02:brightness=0.003:saturation=1.01,"
-        "unsharp=3:3:0.4:2:2:0.2,"
-        "noise=alls=3:allf=t,"
-        "format=yuv420p"
+        f"setpts=PTS-STARTPTS,"
+        f"crop=iw*(1-{crop_pct}):ih*(1-{crop_pct}),"
+        f"scale=trunc(iw/2)*2:trunc(ih/2)*2,"
+        f"setpts={setpts}*PTS,"
+        f"fps={target_fps},"
+        f"eq=contrast={contrast}:brightness={brightness}:saturation={saturation},"
+        f"unsharp=3:3:0.35:2:2:0.18,"
+        f"noise=alls={noise_str}:allf=t,"
+        f"format=yuv420p"
     )
+
+    # audio tempo to match video speed
+    af = f"atempo={speed}"
 
     cmd = [
         "ffmpeg", "-y",
@@ -387,6 +413,7 @@ def enhance_video(input_path: str, output_path: str) -> bool:
         "-crf", "18",
         "-c:a", "aac",
         "-b:a", "192k",
+        "-af", af,
         "-movflags", "+faststart",
         "-pix_fmt", "yuv420p",
         "-vf", vf,
@@ -405,7 +432,16 @@ def enhance_video(input_path: str, output_path: str) -> bool:
             print("===== FFMPEG ERROR (main filter) =====", flush=True)
             print(result.stderr[-3000:] if result.stderr else "No stderr", flush=True)
 
-            print("Trying fallback simple re-encode...", flush=True)
+            # fallback: simpler but still unique
+            print("Trying fallback...", flush=True)
+            simple_vf = (
+                f"trim=start={ss}:duration={t},"
+                "setpts=PTS-STARTPTS,"
+                "scale=trunc(iw/2)*2:trunc(ih/2)*2,"
+                "eq=contrast=1.02:brightness=0.003:saturation=1.01,"
+                "noise=alls=3:allf=t,"
+                "format=yuv420p"
+            )
             simple_cmd = [
                 "ffmpeg", "-y",
                 "-i", input_path,
@@ -419,6 +455,7 @@ def enhance_video(input_path: str, output_path: str) -> bool:
                 "-b:a", "192k",
                 "-movflags", "+faststart",
                 "-pix_fmt", "yuv420p",
+                "-vf", simple_vf,
                 output_path
             ]
             result2 = subprocess.run(
@@ -602,7 +639,7 @@ async def removefree(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await context.bot.send_message(
                 chat_id=target_id,
-                text="Your unlimited access has been removed.\nYou are now on the free daily limit (5 links per day)."
+                text="Your unlimited access has been removed.\nYou are now on the free daily limit (5 actions per day)."
             )
         except Exception:
             pass
@@ -622,7 +659,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = f"📊 Bot Status\n\n"
     text += f"FFmpeg Installed: {'YES ✅' if shutil.which('ffmpeg') else 'NO ❌'}\n"
     text += f"Global Free Mode: {'ON ✅' if global_free else 'OFF (Daily limit active)'}\n"
-    text += f"Daily Free Limit: {DAILY_FREE_LIMIT}\n\n"
+    text += f"Daily Free Limit: {DAILY_FREE_LIMIT} (image + video + link)\n\n"
     text += f"Lifetime Free Users ({len(free_list)}):\n"
     if free_list:
         for uid in free_list:
@@ -883,10 +920,10 @@ async def how(update: Update, context: ContextTypes.DEFAULT_TYPE):
         current_offset += length
 
     add_text("How it works:\n\n")
-    add_text("1. Send a photo or video directly → bot cleans metadata + applies light unique filter so platforms see it as original.\n")
+    add_text("1. Send a photo or video directly → bot cleans metadata + applies unique fingerprint so platforms see it as original.\n")
     add_text("2. Send Instagram / TikTok / Twitter-X link → bot downloads original quality media.\n")
     add_text("3. In groups you must mention the bot or reply to its message.\n\n")
-    add_text("Free users get 5 links/day. Unlimited plans available via /buy.\n\n")
+    add_text("Free users get 5 actions/day (image + video + link). Unlimited plans via /buy.\n\n")
     add_text("For any help contact @pvnuo")
 
     text = "".join(text_parts)
@@ -899,6 +936,16 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     if not message:
         return
+
+    user = update.effective_user
+    user_id = user.id if user else 0
+    username = user.username if user else None
+
+    allowed, limit_msg = can_use_bot(user_id, username)
+    if not allowed:
+        await message.reply_text(limit_msg)
+        return
+
     if message.chat.type in ["group", "supergroup"]:
         bot_username = (await context.bot.get_me()).username.lower()
         caption = (message.caption or "").lower()
@@ -926,7 +973,7 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
         image = Image.open(io.BytesIO(image_bytes))
         result = enhance_image(image)
         output = io.BytesIO()
-        quality = random.randint(95, 97)
+        quality = random.randint(94, 97)
         result.save(output, format="JPEG", quality=quality, optimize=True, progressive=True, subsampling=0)
         output.seek(0)
         elapsed = round(time.time() - start_time, 2)
@@ -934,6 +981,7 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
             photo=output,
             caption=f"✅ Unique version ready\n⏱ {elapsed}s | Quality: {quality}",
         )
+        increment_usage(user_id)
         try:
             await status_msg.delete()
         except Exception:
@@ -952,6 +1000,16 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     if not message:
         return
+
+    user = update.effective_user
+    user_id = user.id if user else 0
+    username = user.username if user else None
+
+    allowed, limit_msg = can_use_bot(user_id, username)
+    if not allowed:
+        await message.reply_text(limit_msg)
+        return
+
     if message.chat.type in ["group", "supergroup"]:
         bot_username = (await context.bot.get_me()).username.lower()
         caption = (message.caption or "").lower()
@@ -998,6 +1056,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 message, output_path, "✅ Here’s your modified video", unique_id
             )
             if ok:
+                increment_usage(user_id)
                 try:
                     await status_msg.delete()
                 except Exception:
