@@ -14,7 +14,6 @@ from dotenv import load_dotenv
 from telegram import (
     Update,
     InputMediaPhoto,
-    LabeledPrice,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     MessageEntity,
@@ -26,11 +25,10 @@ from telegram.ext import (
     MessageHandler,
     CommandHandler,
     CallbackQueryHandler,
-    PreCheckoutQueryHandler,
     filters,
     ContextTypes,
 )
-from PIL import Image, ImageEnhance, ImageFilter
+from PIL import Image, ImageEnhance, ImageFilter, ImageDraw
 import numpy as np
 import yt_dlp
 import instaloader
@@ -44,17 +42,16 @@ if not BOT_TOKEN:
 # ====================== CONFIG ======================
 ADMIN_USERNAME = "pvnuo"
 DAILY_FREE_LIMIT = 5
-DB_FILE = "bot_data.db"
-LIFETIME_FREE_FILE = "lifetime_free.json"
 
-HARDCODED_LIFETIME_FREE = [
-    # example:
-    # 123456789,
-]
+DATA_DIR = os.getenv("DATA_DIR", ".")
+DB_FILE = os.path.join(DATA_DIR, "bot_data.db")
+LIFETIME_FREE_FILE = os.path.join(DATA_DIR, "lifetime_free.json")
+
+HARDCODED_LIFETIME_FREE = []
 # ====================================================
 
 # ------------------------------------------------------
-# Lifetime free JSON helpers (survive bot updates)
+# Lifetime free JSON helpers
 # ------------------------------------------------------
 def load_lifetime_free_json() -> list:
     if not os.path.exists(LIFETIME_FREE_FILE):
@@ -70,6 +67,7 @@ def load_lifetime_free_json() -> list:
 
 def save_lifetime_free_json(user_ids: list):
     try:
+        os.makedirs(DATA_DIR, exist_ok=True)
         with open(LIFETIME_FREE_FILE, "w", encoding="utf-8") as f:
             json.dump(sorted(set(int(x) for x in user_ids)), f, indent=2)
     except Exception as e:
@@ -91,6 +89,7 @@ def sync_lifetime_free_from_json():
 # Database
 # ------------------------------------------------------
 def init_db():
+    os.makedirs(DATA_DIR, exist_ok=True)
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("""
@@ -236,17 +235,22 @@ def increment_usage(user_id: int):
     conn.commit()
     conn.close()
 
-def can_use_bot(user_id: int, username: str = None) -> tuple[bool, str]:
+def remaining_quota(user_id: int, username: str = None) -> int:
+    """How many free actions left today. Returns 999999 for unlimited users."""
     if username and username.lower() == ADMIN_USERNAME.lower():
-        return True, ""
+        return 999999
     if is_global_free():
-        return True, ""
+        return 999999
     if is_lifetime_free(user_id):
-        return True, ""
+        return 999999
     if is_paid_user(user_id):
-        return True, ""
+        return 999999
     used = get_today_usage(user_id)
-    if used < DAILY_FREE_LIMIT:
+    return max(0, DAILY_FREE_LIMIT - used)
+
+def can_use_bot(user_id: int, username: str = None) -> tuple[bool, str]:
+    left = remaining_quota(user_id, username)
+    if left > 0:
         return True, ""
     return False, (
         "You have used all 5 free actions for today.\n"
@@ -273,7 +277,32 @@ def keep_alive():
     t.start()
 
 # ------------------------------------------------------
-# Image enhance (stronger dirty unique)
+# Create random texture for overlay
+# ------------------------------------------------------
+def create_noise_texture(width: int, height: int, unique_id: str) -> str:
+    """Create a random noise texture image for low-opacity overlay."""
+    path = f"texture_{unique_id}.png"
+    img = Image.new("RGB", (width, height))
+    pixels = img.load()
+    for y in range(height):
+        for x in range(width):
+            v = random.randint(0, 255)
+            pixels[x, y] = (v, v, v)
+    # add some colored noise
+    for _ in range(width * height // 40):
+        x = random.randint(0, width - 1)
+        y = random.randint(0, height - 1)
+        pixels[x, y] = (
+            random.randint(0, 255),
+            random.randint(0, 255),
+            random.randint(0, 255)
+        )
+    img = img.filter(ImageFilter.GaussianBlur(radius=random.uniform(0.6, 1.8)))
+    img.save(path, "PNG")
+    return path
+
+# ------------------------------------------------------
+# Image enhance
 # ------------------------------------------------------
 def enhance_image(image: Image.Image) -> Image.Image:
     if image.mode != "RGB":
@@ -282,63 +311,58 @@ def enhance_image(image: Image.Image) -> Image.Image:
     original_size = image.size
     w, h = original_size
 
-    # slight random crop (1-2.5%) then resize back
-    crop_pct = random.uniform(0.01, 0.025)
-    left = int(w * crop_pct * random.uniform(0.3, 0.7))
-    top = int(h * crop_pct * random.uniform(0.3, 0.7))
-    right = w - int(w * crop_pct * random.uniform(0.3, 0.7))
-    bottom = h - int(h * crop_pct * random.uniform(0.3, 0.7))
+    # random crop 1-3%
+    crop_pct = random.uniform(0.012, 0.03)
+    left = int(w * crop_pct * random.uniform(0.2, 0.8))
+    top = int(h * crop_pct * random.uniform(0.2, 0.8))
+    right = w - int(w * crop_pct * random.uniform(0.2, 0.8))
+    bottom = h - int(h * crop_pct * random.uniform(0.2, 0.8))
     image = image.crop((left, top, right, bottom)).resize(original_size, Image.Resampling.LANCZOS)
 
-    data = list(image.getdata())
-    clean = Image.new(image.mode, image.size)
-    clean.putdata(data)
+    # micro rotate
+    angle = random.uniform(0.04, 0.11) * random.choice([-1, 1])
+    image = image.rotate(angle, resample=Image.Resampling.BICUBIC, expand=False)
+    image = image.rotate(-angle, resample=Image.Resampling.BICUBIC, expand=False)
 
-    angle = random.uniform(0.03, 0.09) * random.choice([-1, 1])
-    clean = clean.rotate(angle, resample=Image.Resampling.BICUBIC, expand=False)
-    clean = clean.rotate(-angle, resample=Image.Resampling.BICUBIC, expand=False)
+    # slight resize bounce
+    factor = random.uniform(0.993, 0.998)
+    image = image.resize((int(w * factor), int(h * factor)), Image.Resampling.LANCZOS)
+    image = image.resize(original_size, Image.Resampling.LANCZOS)
 
-    factor = random.uniform(0.994, 0.998)
-    clean = clean.resize((int(w * factor), int(h * factor)), Image.Resampling.LANCZOS)
-    clean = clean.resize(original_size, Image.Resampling.LANCZOS)
-
-    noise = Image.effect_noise(clean.size, random.uniform(2.0, 4.0))
+    # noise blend
+    noise = Image.effect_noise(image.size, random.uniform(2.5, 5.0))
     noise = noise.convert("L")
-    noise = ImageEnhance.Brightness(noise).enhance(random.uniform(0.07, 0.13))
-    clean = Image.blend(clean, noise.convert("RGB"), random.uniform(0.03, 0.07))
+    noise = ImageEnhance.Brightness(noise).enhance(random.uniform(0.08, 0.16))
+    image = Image.blend(image, noise.convert("RGB"), random.uniform(0.04, 0.09))
 
-    r, g, b = clean.split()
-    r = ImageEnhance.Brightness(r).enhance(random.uniform(0.988, 1.012))
-    g = ImageEnhance.Brightness(g).enhance(random.uniform(0.988, 1.012))
-    b = ImageEnhance.Brightness(b).enhance(random.uniform(0.988, 1.012))
-    clean = Image.merge("RGB", (r, g, b))
+    # channel shift
+    r, g, b = image.split()
+    r = ImageEnhance.Brightness(r).enhance(random.uniform(0.985, 1.015))
+    g = ImageEnhance.Brightness(g).enhance(random.uniform(0.985, 1.015))
+    b = ImageEnhance.Brightness(b).enhance(random.uniform(0.985, 1.015))
+    image = Image.merge("RGB", (r, g, b))
 
-    clean = clean.filter(ImageFilter.UnsharpMask(
-        radius=random.uniform(0.8, 1.3),
-        percent=random.randint(70, 110),
+    image = image.filter(ImageFilter.UnsharpMask(
+        radius=random.uniform(0.8, 1.4),
+        percent=random.randint(70, 115),
         threshold=1
     ))
 
-    enhancer = ImageEnhance.Contrast(clean)
-    clean = enhancer.enhance(random.uniform(1.03, 1.09))
+    image = ImageEnhance.Contrast(image).enhance(random.uniform(1.03, 1.10))
+    image = ImageEnhance.Color(image).enhance(random.uniform(0.97, 1.05))
 
-    enhancer = ImageEnhance.Color(clean)
-    clean = enhancer.enhance(random.uniform(0.98, 1.04))
-
-    temp = io.BytesIO()
-    clean.save(temp, format="PNG", optimize=True)
-    temp.seek(0)
-    clean = Image.open(temp).convert("RGB")
+    # low opacity random texture overlay
+    texture = Image.effect_noise(image.size, random.uniform(8, 18)).convert("RGB")
+    texture = ImageEnhance.Brightness(texture).enhance(random.uniform(0.4, 0.7))
+    image = Image.blend(image, texture, random.uniform(0.025, 0.055))
 
     out = io.BytesIO()
-    clean.save(out, format="JPEG", quality=random.randint(94, 97), optimize=True, progressive=True, subsampling=0)
+    image.save(out, format="JPEG", quality=random.randint(93, 97), optimize=True, progressive=True, subsampling=0)
     out.seek(0)
-    clean = Image.open(out).convert("RGB")
-
-    return clean
+    return Image.open(out).convert("RGB")
 
 # ------------------------------------------------------
-# Video enhance — stronger unique (crop + speed + fps + mild look)
+# Video enhance — strong unique (overlay + speed + crop + fps)
 # ------------------------------------------------------
 def enhance_video(input_path: str, output_path: str) -> bool:
     if not shutil.which("ffmpeg"):
@@ -358,49 +382,153 @@ def enhance_video(input_path: str, output_path: str) -> bool:
         print(f"ffprobe failed: {e}", flush=True)
         duration = 0.0
 
-    # trim 0.5-0.7s from start and end if long enough
-    trim_start = random.uniform(0.5, 0.7)
-    trim_end = random.uniform(0.5, 0.7)
-    if duration > (trim_start + trim_end + 2.5):
-        ss = trim_start
-        t = duration - trim_start - trim_end
-    else:
-        ss = 0.0
-        t = max(duration, 0.1)
+    # get resolution
+    width, height = 1280, 720
+    try:
+        probe2 = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=width,height", "-of", "csv=p=0", input_path],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=20
+        )
+        if probe2.stdout.strip():
+            parts = probe2.stdout.strip().split(",")
+            if len(parts) >= 2:
+                width = int(parts[0])
+                height = int(parts[1])
+    except Exception:
+        pass
 
-    # micro speed change (very hard for hash systems)
-    speed = random.uniform(0.978, 1.022)
-    setpts = 1.0 / speed
+    unique_id = str(int(time.time() * 1000))
+    texture_path = None
 
-    # random slight crop (1.2% - 2.8%)
-    crop_pct = random.uniform(0.012, 0.028)
-    # we use relative crop in filter
+    try:
+        # create random texture for overlay
+        texture_path = create_noise_texture(min(width, 640), min(height, 360), unique_id)
 
-    # force a slightly different fps sometimes
-    target_fps = random.choice([29.97, 30, 25, 24, 23.976])
+        # trim
+        trim_start = random.uniform(0.45, 0.75)
+        trim_end = random.uniform(0.45, 0.75)
+        if duration > (trim_start + trim_end + 2.5):
+            ss = trim_start
+            t = duration - trim_start - trim_end
+        else:
+            ss = 0.0
+            t = max(duration, 0.1)
 
-    # mild visual only (no pink)
-    contrast = random.uniform(1.015, 1.04)
-    brightness = random.uniform(-0.005, 0.008)
-    saturation = random.uniform(0.99, 1.025)
-    noise_str = random.randint(2, 5)
+        # micro speed
+        speed = random.uniform(0.975, 1.025)
+        setpts = 1.0 / speed
 
+        # crop
+        crop_pct = random.uniform(0.015, 0.032)
+
+        # fps
+        target_fps = random.choice([23.976, 24, 25, 29.97, 30])
+
+        # mild look
+        contrast = random.uniform(1.01, 1.045)
+        brightness = random.uniform(-0.008, 0.01)
+        saturation = random.uniform(0.985, 1.03)
+        noise_str = random.randint(3, 7)
+
+        # opacity of texture overlay (very low so almost invisible)
+        overlay_opacity = random.uniform(0.04, 0.085)
+
+        vf = (
+            f"trim=start={ss}:duration={t},"
+            f"setpts=PTS-STARTPTS,"
+            f"crop=iw*(1-{crop_pct}):ih*(1-{crop_pct}),"
+            f"scale=trunc(iw/2)*2:trunc(ih/2)*2,"
+            f"setpts={setpts}*PTS,"
+            f"fps={target_fps},"
+            f"eq=contrast={contrast}:brightness={brightness}:saturation={saturation},"
+            f"unsharp=3:3:0.4:2:2:0.2,"
+            f"noise=alls={noise_str}:allf=t,"
+            f"format=yuv420p"
+        )
+
+        # two-pass style: first process, then overlay texture
+        temp_path = f"temp_vid_{unique_id}.mp4"
+
+        cmd1 = [
+            "ffmpeg", "-y",
+            "-i", input_path,
+            "-map_metadata", "-1",
+            "-map", "0:v:0",
+            "-map", "0:a:0?",
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-threads", "2",
+            "-crf", "18",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-af", f"atempo={speed}",
+            "-movflags", "+faststart",
+            "-pix_fmt", "yuv420p",
+            "-vf", vf,
+            temp_path
+        ]
+
+        result1 = subprocess.run(cmd1, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=600, text=True)
+        if result1.returncode != 0 or not os.path.exists(temp_path):
+            print("===== FFMPEG ERROR (main) =====", flush=True)
+            print(result1.stderr[-2500:] if result1.stderr else "No stderr", flush=True)
+            # fallback without texture
+            return _fallback_enhance(input_path, output_path, ss, t)
+
+        # second pass: overlay texture at low opacity
+        overlay_vf = (
+            f"[1:v]scale={width}:{height},format=rgba,colorchannelmixer=aa={overlay_opacity}[tex];"
+            f"[0:v][tex]overlay=0:0:format=auto,format=yuv420p"
+        )
+
+        cmd2 = [
+            "ffmpeg", "-y",
+            "-i", temp_path,
+            "-i", texture_path,
+            "-filter_complex", overlay_vf,
+            "-map", "0:a?",
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-crf", "18",
+            "-c:a", "copy",
+            "-movflags", "+faststart",
+            "-pix_fmt", "yuv420p",
+            output_path
+        ]
+
+        result2 = subprocess.run(cmd2, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300, text=True)
+
+        if result2.returncode != 0 or not (os.path.exists(output_path) and os.path.getsize(output_path) > 10000):
+            print("===== OVERLAY FAILED, using first pass =====", flush=True)
+            if os.path.exists(temp_path):
+                shutil.copy(temp_path, output_path)
+            else:
+                return False
+
+        return os.path.exists(output_path) and os.path.getsize(output_path) > 10000
+
+    except Exception as e:
+        print(f"FFmpeg Exception: {e}", flush=True)
+        return False
+    finally:
+        for p in [texture_path, f"temp_vid_{unique_id}.mp4"]:
+            if p and os.path.exists(p):
+                try:
+                    os.remove(p)
+                except Exception:
+                    pass
+
+def _fallback_enhance(input_path: str, output_path: str, ss: float, t: float) -> bool:
+    """Simple but still unique fallback."""
     vf = (
         f"trim=start={ss}:duration={t},"
-        f"setpts=PTS-STARTPTS,"
-        f"crop=iw*(1-{crop_pct}):ih*(1-{crop_pct}),"
-        f"scale=trunc(iw/2)*2:trunc(ih/2)*2,"
-        f"setpts={setpts}*PTS,"
-        f"fps={target_fps},"
-        f"eq=contrast={contrast}:brightness={brightness}:saturation={saturation},"
-        f"unsharp=3:3:0.35:2:2:0.18,"
-        f"noise=alls={noise_str}:allf=t,"
-        f"format=yuv420p"
+        "setpts=PTS-STARTPTS,"
+        "scale=trunc(iw/2)*2:trunc(ih/2)*2,"
+        "eq=contrast=1.025:brightness=0.004:saturation=1.015,"
+        "noise=alls=4:allf=t,"
+        "format=yuv420p"
     )
-
-    # audio tempo to match video speed
-    af = f"atempo={speed}"
-
     cmd = [
         "ffmpeg", "-y",
         "-i", input_path,
@@ -409,71 +537,18 @@ def enhance_video(input_path: str, output_path: str) -> bool:
         "-map", "0:a:0?",
         "-c:v", "libx264",
         "-preset", "veryfast",
-        "-threads", "2",
         "-crf", "18",
         "-c:a", "aac",
         "-b:a", "192k",
-        "-af", af,
         "-movflags", "+faststart",
         "-pix_fmt", "yuv420p",
         "-vf", vf,
         output_path
     ]
-
     try:
-        result = subprocess.run(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=600,
-            text=True
-        )
-        if result.returncode != 0:
-            print("===== FFMPEG ERROR (main filter) =====", flush=True)
-            print(result.stderr[-3000:] if result.stderr else "No stderr", flush=True)
-
-            # fallback: simpler but still unique
-            print("Trying fallback...", flush=True)
-            simple_vf = (
-                f"trim=start={ss}:duration={t},"
-                "setpts=PTS-STARTPTS,"
-                "scale=trunc(iw/2)*2:trunc(ih/2)*2,"
-                "eq=contrast=1.02:brightness=0.003:saturation=1.01,"
-                "noise=alls=3:allf=t,"
-                "format=yuv420p"
-            )
-            simple_cmd = [
-                "ffmpeg", "-y",
-                "-i", input_path,
-                "-map_metadata", "-1",
-                "-map", "0:v:0",
-                "-map", "0:a:0?",
-                "-c:v", "libx264",
-                "-preset", "veryfast",
-                "-crf", "18",
-                "-c:a", "aac",
-                "-b:a", "192k",
-                "-movflags", "+faststart",
-                "-pix_fmt", "yuv420p",
-                "-vf", simple_vf,
-                output_path
-            ]
-            result2 = subprocess.run(
-                simple_cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=600,
-                text=True
-            )
-            if result2.returncode != 0:
-                print("===== FFMPEG ERROR (fallback) =====", flush=True)
-                print(result2.stderr[-2000:] if result2.stderr else "No stderr", flush=True)
-                return False
-            return os.path.exists(output_path) and os.path.getsize(output_path) > 10000
-
-        return os.path.exists(output_path) and os.path.getsize(output_path) > 10000
-    except Exception as e:
-        print(f"FFmpeg Exception: {e}", flush=True)
+        r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=600, text=True)
+        return r.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 10000
+    except Exception:
         return False
 
 def compress_video_if_needed(path: str, unique_id: str, max_mb: float = 45.0) -> str:
@@ -517,7 +592,6 @@ async def safe_send_video(message, path: str, caption: str, unique_id: str):
     if not os.path.exists(path):
         return False
     size = os.path.getsize(path)
-
     force_doc = size > 40 * 1024 * 1024
 
     try:
@@ -659,7 +733,8 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = f"📊 Bot Status\n\n"
     text += f"FFmpeg Installed: {'YES ✅' if shutil.which('ffmpeg') else 'NO ❌'}\n"
     text += f"Global Free Mode: {'ON ✅' if global_free else 'OFF (Daily limit active)'}\n"
-    text += f"Daily Free Limit: {DAILY_FREE_LIMIT} (image + video + link)\n\n"
+    text += f"Daily Free Limit: {DAILY_FREE_LIMIT} (image + video + link)\n"
+    text += f"Data Dir: {DATA_DIR}\n\n"
     text += f"Lifetime Free Users ({len(free_list)}):\n"
     if free_list:
         for uid in free_list:
@@ -678,83 +753,19 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text)
 
 # ------------------------------------------------------
-# Buy / Payment
+# Buy — CRYPTO ONLY (Stars removed)
 # ------------------------------------------------------
 async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton("30 Days Unlimited — 79 ⭐", callback_data="buy_30")],
-        [InlineKeyboardButton("3 Months Unlimited — 249 ⭐", callback_data="buy_90")],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
     await update.message.reply_text(
-        "💎 Choose a plan:\n\n"
-        "• 30 Days Unlimited Access → 79 Stars\n"
-        "• 3 Months Unlimited Access → 249 Stars\n\n"
-        "———————————————\n"
-        "Or pay with crypto:\n\n"
-        "SOL (Solana):\n"
-        "7vxg8qL8Mc3zG5TH9GoQSuxTAVnUS5BaacWkPrNL2wYe\n\n"
-        "Pay $5 for 30 days trial\n"
-        "Pay $12 for 3 month trial\n\n"
-        "Send screenshot to @pvnuo for unlimited access.\n\n"
+        "💎 Unlimited Access (Crypto Only)\n\n"
+        "Pay with Solana (SOL):\n\n"
+        "`7vxg8qL8Mc3zG5TH9GoQSuxTAVnUS5BaacWkPrNL2wYe`\n\n"
+        "• $5  → 30 days unlimited\n"
+        "• $12 → 3 months unlimited\n\n"
+        "After payment send screenshot to @pvnuo\n"
+        "Access will be activated manually.\n\n"
         "For any help contact @pvnuo",
-        reply_markup=reply_markup
-    )
-
-async def buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    data = query.data
-    user_id = query.from_user.id
-    
-    if data == "buy_30":
-        title = "30 Days Unlimited Access"
-        description = "Get unlimited downloads for 30 days"
-        payload = "plan_30"
-        prices = [LabeledPrice("30 Days Unlimited", 79)]
-    elif data == "buy_90":
-        title = "3 Months Unlimited Access"
-        description = "Get unlimited downloads for 90 days"
-        payload = "plan_90"
-        prices = [LabeledPrice("3 Months Unlimited", 249)]
-    else:
-        return
-    
-    await context.bot.send_invoice(
-        chat_id=user_id,
-        title=title,
-        description=description,
-        payload=payload,
-        provider_token="",
-        currency="XTR",
-        prices=prices,
-        start_parameter="buy"
-    )
-
-async def precheckout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.pre_checkout_query
-    await query.answer(ok=True)
-
-async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    payment = update.message.successful_payment
-    user_id = update.effective_user.id
-    payload = payment.invoice_payload
-    
-    if payload == "plan_30":
-        days = 30
-    elif payload == "plan_90":
-        days = 90
-    else:
-        days = 30
-    
-    expiry = add_paid_user(user_id, days)
-    
-    await update.message.reply_text(
-        f"✅ Payment successful!\n\n"
-        f"You now have unlimited access until {expiry.strftime('%d %b %Y')}.\n"
-        f"Enjoy the bot!"
+        parse_mode="Markdown"
     )
 
 # ------------------------------------------------------
@@ -806,7 +817,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     add_text(" TikTok or ")
     add_custom("6203873525116183636")
     add_text(" Twitter/X link and I will download it in original quality.\n\n")
-    add_text("🚨 Note: No tool can completely remove AI signatures from every file. Results vary by platform and content, but this bot works well on many images & videos.\n\n")
+    add_text("🚨 Note: No tool can completely remove AI signatures from every file. Results vary by platform and content.\n\n")
     add_text("In groups: mention me with the photo, video or link.\n\n")
     add_text("For any help contact @pvnuo ")
     add_custom("6201528571756815592")
@@ -815,119 +826,45 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, entities=entities, reply_markup=get_user_keyboard(update.effective_user.username if update.effective_user else None))
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text_parts = []
-    entities = []
-    current_offset = 0
-
-    def add_text(s: str):
-        nonlocal current_offset
-        text_parts.append(s)
-        current_offset += len(s.encode("utf-16-le")) // 2
-
-    def add_custom(emoji_id: str, placeholder: str = "🔥"):
-        nonlocal current_offset
-        text_parts.append(placeholder)
-        length = len(placeholder.encode("utf-16-le")) // 2
-        entities.append(MessageEntity(
-            type=MessageEntity.CUSTOM_EMOJI,
-            offset=current_offset,
-            length=length,
-            custom_emoji_id=str(emoji_id)
-        ))
-        current_offset += length
-
-    add_text("Available Commands:\n\n")
-    add_text("/start  – Start the bot\n")
-    add_text("/help   – Show this help\n")
-    add_text("/about  – About this bot\n")
-    add_text("/how    – How it works\n")
-    add_text("/buy    – Buy unlimited access\n\n")
-    add_text("How to use:\n")
-    add_text("• Send any photo → get a unique cleaned version\n")
-    add_text("• Send any video → get a unique high-quality version\n")
-    add_text("• Send ")
-    add_custom("6201514939530618666")
-    add_text(" Instagram / ")
-    add_custom("6204008550298033491")
-    add_text(" TikTok / ")
-    add_custom("6203873525116183636")
-    add_text(" Twitter/X link → download media in original quality\n\n")
-    add_text("In groups: mention me with the photo, video or link.\n\n")
-    add_text("For any help contact @pvnuo")
-
-    text = "".join(text_parts)
-    await update.message.reply_text(text, entities=entities, reply_markup=get_user_keyboard(update.effective_user.username if update.effective_user else None))
+    text = (
+        "Available Commands:\n\n"
+        "/start  – Start the bot\n"
+        "/help   – Show this help\n"
+        "/about  – About this bot\n"
+        "/how    – How it works\n"
+        "/buy    – Buy unlimited access (crypto)\n\n"
+        "How to use:\n"
+        "• Send any photo → unique cleaned version\n"
+        "• Send any video → unique high-quality version\n"
+        "• Send Instagram / TikTok / Twitter-X link → download original quality\n\n"
+        "In groups: mention me with the photo, video or link.\n\n"
+        "Free users get 5 actions per day.\n"
+        "For any help contact @pvnuo"
+    )
+    await update.message.reply_text(text, reply_markup=get_user_keyboard(update.effective_user.username if update.effective_user else None))
 
 async def about(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text_parts = []
-    entities = []
-    current_offset = 0
-
-    def add_text(s: str):
-        nonlocal current_offset
-        text_parts.append(s)
-        current_offset += len(s.encode("utf-16-le")) // 2
-
-    def add_custom(emoji_id: str, placeholder: str = "🔥"):
-        nonlocal current_offset
-        text_parts.append(placeholder)
-        length = len(placeholder.encode("utf-16-le")) // 2
-        entities.append(MessageEntity(
-            type=MessageEntity.CUSTOM_EMOJI,
-            offset=current_offset,
-            length=length,
-            custom_emoji_id=str(emoji_id)
-        ))
-        current_offset += length
-
-    add_text("About this Bot:\n\n")
-    add_text("• Send any image or video and get a cleaned unique version (no content loss).\n")
-    add_text("• Helps reduce AI labels and unoriginal content strikes while keeping high quality.\n")
-    add_text("• You can also send any ")
-    add_custom("6201514939530618666")
-    add_text(" Instagram, ")
-    add_custom("6204008550298033491")
-    add_text(" TikTok or ")
-    add_custom("6203873525116183636")
-    add_text(" Twitter/X link and I will download the media in original quality.\n\n")
-    add_text("In groups: mention me with the photo, video or link.\n\n")
-    add_text("For any help contact @pvnuo ")
-    add_custom("6201528571756815592")
-
-    text = "".join(text_parts)
-    await update.message.reply_text(text, entities=entities, reply_markup=get_user_keyboard(update.effective_user.username if update.effective_user else None))
+    text = (
+        "About this Bot:\n\n"
+        "• Send any image or video and get a cleaned unique version.\n"
+        "• Helps reduce AI labels and unoriginal content strikes.\n"
+        "• Also supports Instagram, TikTok and Twitter/X downloads.\n\n"
+        "In groups: mention me with the photo, video or link.\n\n"
+        "For any help contact @pvnuo"
+    )
+    await update.message.reply_text(text, reply_markup=get_user_keyboard(update.effective_user.username if update.effective_user else None))
 
 async def how(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text_parts = []
-    entities = []
-    current_offset = 0
-
-    def add_text(s: str):
-        nonlocal current_offset
-        text_parts.append(s)
-        current_offset += len(s.encode("utf-16-le")) // 2
-
-    def add_custom(emoji_id: str, placeholder: str = "🔥"):
-        nonlocal current_offset
-        text_parts.append(placeholder)
-        length = len(placeholder.encode("utf-16-le")) // 2
-        entities.append(MessageEntity(
-            type=MessageEntity.CUSTOM_EMOJI,
-            offset=current_offset,
-            length=length,
-            custom_emoji_id=str(emoji_id)
-        ))
-        current_offset += length
-
-    add_text("How it works:\n\n")
-    add_text("1. Send a photo or video directly → bot cleans metadata + applies unique fingerprint so platforms see it as original.\n")
-    add_text("2. Send Instagram / TikTok / Twitter-X link → bot downloads original quality media.\n")
-    add_text("3. In groups you must mention the bot or reply to its message.\n\n")
-    add_text("Free users get 5 actions/day (image + video + link). Unlimited plans via /buy.\n\n")
-    add_text("For any help contact @pvnuo")
-
-    text = "".join(text_parts)
-    await update.message.reply_text(text, entities=entities, reply_markup=get_user_keyboard(update.effective_user.username if update.effective_user else None))
+    text = (
+        "How it works:\n\n"
+        "1. Send photo or video → bot applies unique fingerprint (crop + texture overlay + speed + fps change).\n"
+        "2. Send Instagram / TikTok / X link → downloads original quality.\n"
+        "3. In groups you must mention the bot.\n\n"
+        "Free users: 5 actions/day (image + video + link combined).\n"
+        "Unlimited: /buy (crypto only).\n\n"
+        "For any help contact @pvnuo"
+    )
+    await update.message.reply_text(text, reply_markup=get_user_keyboard(update.effective_user.username if update.effective_user else None))
 
 # ------------------------------------------------------
 # Image handler
@@ -941,9 +878,14 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = user.id if user else 0
     username = user.username if user else None
 
-    allowed, limit_msg = can_use_bot(user_id, username)
-    if not allowed:
-        await message.reply_text(limit_msg)
+    # strict quota check
+    left = remaining_quota(user_id, username)
+    if left <= 0:
+        await message.reply_text(
+            "You have used all 5 free actions for today.\n"
+            "Please try again tomorrow or contact @pvnuo for unlimited access.\n\n"
+            "👉 /buy"
+        )
         return
 
     if message.chat.type in ["group", "supergroup"]:
@@ -969,11 +911,12 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await status_msg.delete()
             return
+
         image_bytes = await file.download_as_bytearray()
         image = Image.open(io.BytesIO(image_bytes))
         result = enhance_image(image)
         output = io.BytesIO()
-        quality = random.randint(94, 97)
+        quality = random.randint(93, 97)
         result.save(output, format="JPEG", quality=quality, optimize=True, progressive=True, subsampling=0)
         output.seek(0)
         elapsed = round(time.time() - start_time, 2)
@@ -1005,9 +948,14 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = user.id if user else 0
     username = user.username if user else None
 
-    allowed, limit_msg = can_use_bot(user_id, username)
-    if not allowed:
-        await message.reply_text(limit_msg)
+    # strict quota check
+    left = remaining_quota(user_id, username)
+    if left <= 0:
+        await message.reply_text(
+            "You have used all 5 free actions for today.\n"
+            "Please try again tomorrow or contact @pvnuo for unlimited access.\n\n"
+            "👉 /buy"
+        )
         return
 
     if message.chat.type in ["group", "supergroup"]:
@@ -1026,7 +974,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status_msg = await message.reply_text("⌛")
     
     if not shutil.which("ffmpeg"):
-        await status_msg.edit_text("❌ Server error: FFmpeg not installed. Install ffmpeg and add it to PATH.")
+        await status_msg.edit_text("❌ Server error: FFmpeg not installed.")
         return
 
     target_obj = message.video or (message.document if message.document and "video" in (message.document.mime_type or "") else None)
@@ -1038,8 +986,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         size_mb = round(target_obj.file_size / (1024 * 1024), 1)
         await status_msg.edit_text(
             f"❌ File too large ({size_mb} MB).\n"
-            f"Telegram Bot API limits bot downloads to 20 MB max.\n"
-            f"Please compress or trim the video before sending."
+            f"Telegram Bot API limits bot downloads to 20 MB max."
         )
         return
 
@@ -1064,7 +1011,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 await status_msg.edit_text("❌ Failed to send the video.")
         else:
-            await status_msg.edit_text("❌ Failed to process the video. Check terminal for ffmpeg error.")
+            await status_msg.edit_text("❌ Failed to process the video.")
     except Exception as e:
         print(f"Video error: {e}", flush=True)
         try:
@@ -1079,14 +1026,14 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except Exception:
                     pass
         for f in os.listdir("."):
-            if f.startswith(f"compressed_{unique_id}") or f.startswith(f"comp_{unique_id}"):
+            if f.startswith(f"comp_{unique_id}") or f.startswith(f"texture_{unique_id}") or f.startswith(f"temp_vid_{unique_id}"):
                 try:
                     os.remove(f)
                 except Exception:
                     pass
 
 # ------------------------------------------------------
-# Instagram
+# Instagram / TikTok / Twitter (same as before)
 # ------------------------------------------------------
 def download_instagram(url: str, unique_id: str):
     L = instaloader.Instaloader(
@@ -1126,38 +1073,9 @@ def download_instagram(url: str, unique_id: str):
         print(f"Download post error: {e}", flush=True)
     return paths
 
-# ------------------------------------------------------
-# TikTok
-# ------------------------------------------------------
 async def download_tiktok(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str):
-    text_parts = []
-    entities = []
-    current_offset = 0
-
-    def add_text(s: str):
-        nonlocal current_offset
-        text_parts.append(s)
-        current_offset += len(s.encode("utf-16-le")) // 2
-
-    def add_custom(emoji_id: str, placeholder: str = "🔥"):
-        nonlocal current_offset
-        text_parts.append(placeholder)
-        length = len(placeholder.encode("utf-16-le")) // 2
-        entities.append(MessageEntity(
-            type=MessageEntity.CUSTOM_EMOJI,
-            offset=current_offset,
-            length=length,
-            custom_emoji_id=str(emoji_id)
-        ))
-        current_offset += length
-
-    add_text("Downloading from ")
-    add_custom("6204008550298033491")
-    add_text(" TikTok...")
-
-    status_text = await update.message.reply_text("".join(text_parts), entities=entities)
+    status_text = await update.message.reply_text("Downloading from TikTok...")
     status_emoji = await update.message.reply_text("⌛")
-
     unique_id = str(int(time.time() * 1000))
     folder = f"tt_{unique_id}_dir"
     os.makedirs(folder, exist_ok=True)
@@ -1172,7 +1090,6 @@ async def download_tiktok(update: Update, context: ContextTypes.DEFAULT_TYPE, ur
             "no_warnings": True,
             "socket_timeout": 60,
             "retries": 10,
-            "fragment_retries": 10,
             "http_headers": {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
                 "Referer": "https://www.tiktok.com/",
@@ -1190,28 +1107,8 @@ async def download_tiktok(update: Update, context: ContextTypes.DEFAULT_TYPE, ur
                         break
         except Exception as e:
             print(f"yt-dlp TikTok: {e}", flush=True)
-        has_video = any(p.lower().endswith((".mp4", ".mkv", ".webm")) for p in paths)
-        if not has_video:
-            try:
-                cmd = [
-                    "gallery-dl",
-                    "--dest", folder,
-                    "--filename", "{id}_{num}.{extension}",
-                    "--no-mtime",
-                    url
-                ]
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
-                if result.returncode == 0:
-                    for root, _, files in os.walk(folder):
-                        for f in files:
-                            full = os.path.join(root, f)
-                            if f.lower().endswith((".jpg", ".jpeg", ".png", ".webp", ".mp4", ".mp3")):
-                                paths.append(full)
-            except Exception as e:
-                print(f"gallery-dl error: {e}", flush=True)
         images = [p for p in paths if p.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))]
         videos = [p for p in paths if p.lower().endswith((".mp4", ".mkv", ".webm"))]
-        audios = [p for p in paths if p.lower().endswith((".mp3", ".m4a"))]
         success = False
         if images:
             media = []
@@ -1222,15 +1119,9 @@ async def download_tiktok(update: Update, context: ContextTypes.DEFAULT_TYPE, ur
             await update.message.reply_media_group(media=media)
             success = True
         for v in videos:
-            ok = await safe_send_video(
-                update.message, v, "✅ Here’s your TikTok video", unique_id
-            )
+            ok = await safe_send_video(update.message, v, "✅ Here’s your TikTok video", unique_id)
             if ok:
                 success = True
-        if not success and audios:
-            with open(audios[0], "rb") as a:
-                await update.message.reply_audio(audio=a, caption="🎵 TikTok audio")
-            success = True
         if success:
             try:
                 await status_text.delete()
@@ -1246,7 +1137,7 @@ async def download_tiktok(update: Update, context: ContextTypes.DEFAULT_TYPE, ur
     except Exception as e:
         print(f"TikTok error: {e}", flush=True)
         try:
-            await status_text.edit_text(f"❌ Failed to download TikTok.\n{str(e)[:120]}")
+            await status_text.edit_text(f"❌ Failed.\n{str(e)[:120]}")
             await status_emoji.delete()
         except Exception:
             pass
@@ -1261,52 +1152,10 @@ async def download_tiktok(update: Update, context: ContextTypes.DEFAULT_TYPE, ur
                 shutil.rmtree(folder, ignore_errors=True)
             except Exception:
                 pass
-        try:
-            for item in os.listdir("."):
-                if item.startswith(f"tt_{unique_id}") or item.startswith(f"temp_{unique_id}"):
-                    path = os.path.join(".", item)
-                    try:
-                        if os.path.isdir(path):
-                            shutil.rmtree(path, ignore_errors=True)
-                        else:
-                            os.remove(path)
-                    except Exception:
-                        pass
-        except Exception:
-            pass
 
-# ------------------------------------------------------
-# Twitter / X
-# ------------------------------------------------------
 async def download_twitter(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str):
-    text_parts = []
-    entities = []
-    current_offset = 0
-
-    def add_text(s: str):
-        nonlocal current_offset
-        text_parts.append(s)
-        current_offset += len(s.encode("utf-16-le")) // 2
-
-    def add_custom(emoji_id: str, placeholder: str = "🔥"):
-        nonlocal current_offset
-        text_parts.append(placeholder)
-        length = len(placeholder.encode("utf-16-le")) // 2
-        entities.append(MessageEntity(
-            type=MessageEntity.CUSTOM_EMOJI,
-            offset=current_offset,
-            length=length,
-            custom_emoji_id=str(emoji_id)
-        ))
-        current_offset += length
-
-    add_text("Downloading from ")
-    add_custom("6203873525116183636")
-    add_text(" Twitter/X...")
-
-    status_text = await update.message.reply_text("".join(text_parts), entities=entities)
+    status_text = await update.message.reply_text("Downloading from Twitter/X...")
     status_emoji = await update.message.reply_text("⌛")
-
     unique_id = str(int(time.time() * 1000))
     folder = f"tw_{unique_id}_dir"
     os.makedirs(folder, exist_ok=True)
@@ -1321,7 +1170,6 @@ async def download_twitter(update: Update, context: ContextTypes.DEFAULT_TYPE, u
             "no_warnings": True,
             "socket_timeout": 60,
             "retries": 10,
-            "fragment_retries": 10,
             "http_headers": {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
                 "Referer": "https://x.com/",
@@ -1349,24 +1197,6 @@ async def download_twitter(update: Update, context: ContextTypes.DEFAULT_TYPE, u
                             break
         except Exception as e:
             print(f"yt-dlp Twitter: {e}", flush=True)
-        if not paths:
-            try:
-                cmd = [
-                    "gallery-dl",
-                    "--dest", folder,
-                    "--filename", "{id}_{num}.{extension}",
-                    "--no-mtime",
-                    url
-                ]
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
-                if result.returncode == 0:
-                    for root, _, files in os.walk(folder):
-                        for f in files:
-                            full = os.path.join(root, f)
-                            if f.lower().endswith((".jpg", ".jpeg", ".png", ".webp", ".mp4", ".mkv", ".webm")):
-                                paths.append(full)
-            except Exception as e:
-                print(f"gallery-dl Twitter error: {e}", flush=True)
         images = [p for p in paths if p.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))]
         videos = [p for p in paths if p.lower().endswith((".mp4", ".mkv", ".webm"))]
         success = False
@@ -1379,9 +1209,7 @@ async def download_twitter(update: Update, context: ContextTypes.DEFAULT_TYPE, u
             await update.message.reply_media_group(media=media)
             success = True
         for v in videos:
-            ok = await safe_send_video(
-                update.message, v, "✅ Here’s your Twitter/X video", unique_id
-            )
+            ok = await safe_send_video(update.message, v, "✅ Here’s your Twitter/X video", unique_id)
             if ok:
                 success = True
         if success:
@@ -1399,7 +1227,7 @@ async def download_twitter(update: Update, context: ContextTypes.DEFAULT_TYPE, u
     except Exception as e:
         print(f"Twitter error: {e}", flush=True)
         try:
-            await status_text.edit_text(f"❌ Failed to download Twitter/X.\n{str(e)[:120]}")
+            await status_text.edit_text(f"❌ Failed.\n{str(e)[:120]}")
             await status_emoji.delete()
         except Exception:
             pass
@@ -1414,19 +1242,6 @@ async def download_twitter(update: Update, context: ContextTypes.DEFAULT_TYPE, u
                 shutil.rmtree(folder, ignore_errors=True)
             except Exception:
                 pass
-        try:
-            for item in os.listdir("."):
-                if item.startswith(f"tw_{unique_id}") or item.startswith(f"temp_{unique_id}"):
-                    path = os.path.join(".", item)
-                    try:
-                        if os.path.isdir(path):
-                            shutil.rmtree(path, ignore_errors=True)
-                        else:
-                            os.remove(path)
-                    except Exception:
-                        pass
-        except Exception:
-            pass
 
 # ------------------------------------------------------
 # Text handler
@@ -1462,29 +1277,17 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await removefreeall(update, context)
         return
     if text == "Free User":
-        await update.message.reply_text(
-            "Usage:\n"
-            "/freeuser @username\n"
-            "/freeuser 123456789\n\n"
-            "Note: User must have started the bot at least once."
-        )
+        await update.message.reply_text("Usage:\n/freeuser @username\n/freeuser 123456789")
         return
     if text == "Remove Free":
-        await update.message.reply_text(
-            "Usage:\n"
-            "/removefree @username\n"
-            "/removefree 123456789"
-        )
+        await update.message.reply_text("Usage:\n/removefree @username\n/removefree 123456789")
         return
 
     if not text.startswith("http"):
         await message.reply_text(
-            "About this Bot:\n\n"
-            "• Just send me any image or video and I will give you a cleaned unique version.\n"
-            "• The changes help reduce AI labels and unoriginal content strikes while keeping high visual quality.\n"
-            "• You can also send any Instagram, TikTok or Twitter/X link and I will download the media for you in original quality.\n\n"
-            "In groups: You must mention me with the photo, video or link.\n\n"
-            "For any help contact @pvnuo",
+            "Send photo / video to clean it, or send Instagram / TikTok / X link.\n\n"
+            "For unlimited access → /buy\n"
+            "Help → /help",
             reply_markup=get_user_keyboard(username)
         )
         return
@@ -1493,6 +1296,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not allowed:
         await message.reply_text(limit_msg)
         return
+
     if message.chat.type in ["group", "supergroup"]:
         bot_username = (await context.bot.get_me()).username.lower()
         mentioned = f"@{bot_username}" in text.lower()
@@ -1504,6 +1308,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 is_reply = True
         if not mentioned and not is_reply:
             return
+
     lower = text.lower()
     if "twitter.com" in lower or "x.com" in lower or "t.co" in lower:
         increment_usage(user_id)
@@ -1517,35 +1322,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         increment_usage(user_id)
         clean_url = re.sub(r"[?&](utm_|igshid|stkn|igsh)=[^&]+", "", text)
         clean_url = clean_url.split("?")[0].rstrip("/")
-        
-        text_parts = []
-        entities = []
-        current_offset = 0
-
-        def add_text(s: str):
-            nonlocal current_offset
-            text_parts.append(s)
-            current_offset += len(s.encode("utf-16-le")) // 2
-
-        def add_custom(emoji_id: str, placeholder: str = "🔥"):
-            nonlocal current_offset
-            text_parts.append(placeholder)
-            length = len(placeholder.encode("utf-16-le")) // 2
-            entities.append(MessageEntity(
-                type=MessageEntity.CUSTOM_EMOJI,
-                offset=current_offset,
-                length=length,
-                custom_emoji_id=str(emoji_id)
-            ))
-            current_offset += length
-
-        add_text("Downloading from ")
-        add_custom("6201514939530618666")
-        add_text(" Instagram...")
-
-        status_text = await message.reply_text("".join(text_parts), entities=entities)
+        status_text = await message.reply_text("Downloading from Instagram...")
         status_emoji = await message.reply_text("⌛")
-        
         unique_id = str(int(time.time() * 1000))
         paths = []
         try:
@@ -1557,10 +1335,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "no_warnings": True,
                     "format": "bv*+ba/b",
                     "merge_output_format": "mp4",
-                    "postprocessors": [{
-                        "key": "FFmpegVideoConvertor",
-                        "preferedformat": "mp4",
-                    }],
                 }
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     info = ydl.extract_info(clean_url, download=True)
@@ -1571,8 +1345,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         if os.path.exists(candidate):
                             paths.append(candidate)
                             break
-                    if not paths and os.path.exists(filename):
-                        paths = [filename]
             if paths:
                 images = [p for p in paths if p.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))]
                 videos = [p for p in paths if p.lower().endswith((".mp4", ".mkv", ".webm"))]
@@ -1580,9 +1352,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     media = [InputMediaPhoto(open(p, "rb")) for p in images[:10]]
                     await message.reply_media_group(media=media)
                 for v in videos:
-                    await safe_send_video(
-                        message, v, "✨ Instagram video", unique_id
-                    )
+                    await safe_send_video(message, v, "✨ Instagram video", unique_id)
                 try:
                     await status_text.delete()
                     await status_emoji.delete()
@@ -1613,14 +1383,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     shutil.rmtree(folder, ignore_errors=True)
                 except Exception:
                     pass
-            for f in os.listdir("."):
-                if f.startswith(f"ig_{unique_id}"):
-                    try:
-                        os.remove(f)
-                    except Exception:
-                        pass
         return
-    await message.reply_text("❌ Only 📸 Instagram, 🎵 TikTok and 𝕏 Twitter/X links are supported.")
+    await message.reply_text("❌ Only Instagram, TikTok and Twitter/X links are supported.")
 
 # ------------------------------------------------------
 # Main
@@ -1647,9 +1411,6 @@ def main():
     app.add_handler(CommandHandler("freeuser", freeuser))
     app.add_handler(CommandHandler("removefree", removefree))
     app.add_handler(CommandHandler("status", status))
-    app.add_handler(CallbackQueryHandler(buy_callback, pattern="^buy_"))
-    app.add_handler(PreCheckoutQueryHandler(precheckout_callback))
-    app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_image))
     app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
