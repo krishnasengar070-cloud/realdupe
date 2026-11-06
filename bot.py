@@ -23,6 +23,7 @@ from telegram.ext import (
     Application,
     MessageHandler,
     CommandHandler,
+    TypeHandler,
     filters,
     ContextTypes,
 )
@@ -61,6 +62,8 @@ def get_user_lock(user_id: int) -> asyncio.Lock:
 
 def is_allowed_chat(message, bot_username: str = None) -> bool:
     """Allow private chats, the configured channel, and groups only when mentioned/replied."""
+    if not message or not getattr(message, "chat", None):
+        return False
     if message.chat.id == CHANNEL_ID:
         return True
     if message.chat.type in ["group", "supergroup"]:
@@ -936,17 +939,19 @@ async def how(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Image handler — STRICT LIMIT + LOCK + CHANNEL
 # ------------------------------------------------------
 async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.effective_message
+    message = update.effective_message or update.channel_post or update.message
     if not message:
         return
 
     user = update.effective_user
     user_id = user.id if user else 0
     username = user.username if user else None
-    is_channel = message.chat.id == CHANNEL_ID
+    is_channel = message.chat and message.chat.id == CHANNEL_ID
 
-    lock = get_user_lock(user_id)
-    async with lock:
+    print(f"[IMG] chat={message.chat.id if message.chat else None} is_channel={is_channel} user={user_id}", flush=True)
+
+    # channel posts have no real user → skip quota completely
+    if not is_channel:
         left = remaining_quota(user_id, username)
         if left <= 0:
             await message.reply_text(
@@ -956,11 +961,23 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        bot_username = (await context.bot.get_me()).username.lower()
-        if not is_allowed_chat(message, bot_username):
-            return
+    bot_username = (await context.bot.get_me()).username.lower()
+    if not is_allowed_chat(message, bot_username):
+        print("[IMG] blocked by is_allowed_chat", flush=True)
+        return
 
-        status_msg = await message.reply_text("⌛")
+    lock = get_user_lock(user_id if user_id else CHANNEL_ID)
+    async with lock:
+        status_msg = None
+        try:
+            status_msg = await message.reply_text("⌛")
+        except Exception as e:
+            print(f"[IMG] status reply failed: {e}", flush=True)
+            try:
+                status_msg = await context.bot.send_message(chat_id=message.chat.id, text="⌛")
+            except Exception as e2:
+                print(f"[IMG] status send failed: {e2}", flush=True)
+
         start_time = time.time()
         try:
             if message.photo:
@@ -968,7 +985,11 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif message.document and message.document.mime_type and "image" in message.document.mime_type:
                 file = await context.bot.get_file(message.document.file_id)
             else:
-                await status_msg.delete()
+                if status_msg:
+                    try:
+                        await status_msg.delete()
+                    except Exception:
+                        pass
                 return
 
             image_bytes = await file.download_as_bytearray()
@@ -979,42 +1000,60 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
             result.save(output, format="JPEG", quality=quality, optimize=True, progressive=True, subsampling=0)
             output.seek(0)
             elapsed = round(time.time() - start_time, 2)
-            await message.reply_photo(
-                photo=output,
-                caption=f"✅ Unique version ready\n⏱ {elapsed}s | Quality: {quality}",
-            )
-            increment_usage(user_id)
+
             try:
-                await status_msg.delete()
+                await message.reply_photo(
+                    photo=output,
+                    caption=f"✅ Unique version ready\n⏱ {elapsed}s | Quality: {quality}",
+                )
             except Exception:
-                pass
+                output.seek(0)
+                await context.bot.send_photo(
+                    chat_id=message.chat.id,
+                    photo=output,
+                    caption=f"✅ Unique version ready\n⏱ {elapsed}s | Quality: {quality}",
+                )
+
+            if not is_channel:
+                increment_usage(user_id)
+
+            if status_msg:
+                try:
+                    await status_msg.delete()
+                except Exception:
+                    pass
+
             if is_channel:
                 try:
                     await message.delete()
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"[IMG] delete original failed: {e}", flush=True)
         except Exception as e:
             print(f"Image error: {e}", flush=True)
             try:
-                await status_msg.edit_text("❌ Failed to process the image.")
+                if status_msg:
+                    await status_msg.edit_text("❌ Failed to process the image.")
+                else:
+                    await message.reply_text("❌ Failed to process the image.")
             except Exception:
-                await message.reply_text("❌ Failed to process the image.")
+                pass
 
 # ------------------------------------------------------
 # Video handler — STRICT LIMIT + LOCK + CHANNEL
 # ------------------------------------------------------
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.effective_message
+    message = update.effective_message or update.channel_post or update.message
     if not message:
         return
 
     user = update.effective_user
     user_id = user.id if user else 0
     username = user.username if user else None
-    is_channel = message.chat.id == CHANNEL_ID
+    is_channel = message.chat and message.chat.id == CHANNEL_ID
 
-    lock = get_user_lock(user_id)
-    async with lock:
+    print(f"[VID] chat={message.chat.id if message.chat else None} is_channel={is_channel} user={user_id}", flush=True)
+
+    if not is_channel:
         left = remaining_quota(user_id, username)
         if left <= 0:
             await message.reply_text(
@@ -1024,28 +1063,50 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        bot_username = (await context.bot.get_me()).username.lower()
-        if not is_allowed_chat(message, bot_username):
-            return
+    bot_username = (await context.bot.get_me()).username.lower()
+    if not is_allowed_chat(message, bot_username):
+        print("[VID] blocked by is_allowed_chat", flush=True)
+        return
 
-        status_msg = await message.reply_text("⌛")
+    lock = get_user_lock(user_id if user_id else CHANNEL_ID)
+    async with lock:
+        status_msg = None
+        try:
+            status_msg = await message.reply_text("⌛")
+        except Exception:
+            try:
+                status_msg = await context.bot.send_message(chat_id=message.chat.id, text="⌛")
+            except Exception as e:
+                print(f"[VID] status failed: {e}", flush=True)
 
         if not shutil.which("ffmpeg"):
-            await status_msg.edit_text("❌ Server error: FFmpeg not installed.")
+            if status_msg:
+                try:
+                    await status_msg.edit_text("❌ Server error: FFmpeg not installed.")
+                except Exception:
+                    pass
             return
 
         target_obj = message.video or (message.document if message.document and "video" in (message.document.mime_type or "") else None)
         if not target_obj:
-            await status_msg.edit_text("❌ Unsupported video format.")
+            if status_msg:
+                try:
+                    await status_msg.edit_text("❌ Unsupported video format.")
+                except Exception:
+                    pass
             return
 
         if target_obj.file_size and target_obj.file_size > 20 * 1024 * 1024:
             size_mb = round(target_obj.file_size / (1024 * 1024), 1)
-            await status_msg.edit_text(
-                f"❌ File too large ({size_mb} MB).\n"
-                f"Telegram Bot API limits bot downloads to 20 MB max.\n"
-                f"Please compress or trim the video before sending."
-            )
+            if status_msg:
+                try:
+                    await status_msg.edit_text(
+                        f"❌ File too large ({size_mb} MB).\n"
+                        f"Telegram Bot API limits bot downloads to 20 MB max.\n"
+                        f"Please compress or trim the video before sending."
+                    )
+                except Exception:
+                    pass
             return
 
         unique_id = str(int(time.time() * 1000))
@@ -1061,26 +1122,37 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     message, output_path, "✅ Here’s your modified video", unique_id
                 )
                 if ok:
-                    increment_usage(user_id)
-                    try:
-                        await status_msg.delete()
-                    except Exception:
-                        pass
+                    if not is_channel:
+                        increment_usage(user_id)
+                    if status_msg:
+                        try:
+                            await status_msg.delete()
+                        except Exception:
+                            pass
                     if is_channel:
                         try:
                             await message.delete()
+                        except Exception as e:
+                            print(f"[VID] delete original failed: {e}", flush=True)
+                else:
+                    if status_msg:
+                        try:
+                            await status_msg.edit_text("❌ Failed to send the video.")
                         except Exception:
                             pass
-                else:
-                    await status_msg.edit_text("❌ Failed to send the video.")
             else:
-                await status_msg.edit_text("❌ Failed to process the video.")
+                if status_msg:
+                    try:
+                        await status_msg.edit_text("❌ Failed to process the video.")
+                    except Exception:
+                        pass
         except Exception as e:
             print(f"Video error: {e}", flush=True)
-            try:
-                await status_msg.edit_text("❌ Failed to process the video.")
-            except Exception:
-                pass
+            if status_msg:
+                try:
+                    await status_msg.edit_text("❌ Failed to process the video.")
+                except Exception:
+                    pass
         finally:
             for p in [input_path, output_path]:
                 if os.path.exists(p):
@@ -1404,14 +1476,16 @@ async def download_twitter(update: Update, context: ContextTypes.DEFAULT_TYPE, u
 # Text handler
 # ------------------------------------------------------
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.effective_message
+    message = update.effective_message or update.channel_post or update.message
     if not message or not message.text:
         return
     text = message.text.strip()
     user = update.effective_user
     user_id = user.id if user else 0
     username = user.username if user else None
-    is_channel = message.chat.id == CHANNEL_ID
+    is_channel = message.chat and message.chat.id == CHANNEL_ID
+
+    print(f"[TXT] chat={message.chat.id if message.chat else None} is_channel={is_channel} text={text[:60]}", flush=True)
 
     if text == "How to use":
         await how(update, context)
@@ -1463,10 +1537,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    allowed, limit_msg = can_use_bot(user_id, username)
-    if not allowed:
-        await message.reply_text(limit_msg)
-        return
+    if not is_channel:
+        allowed, limit_msg = can_use_bot(user_id, username)
+        if not allowed:
+            await message.reply_text(limit_msg)
+            return
 
     bot_username = (await context.bot.get_me()).username.lower()
     if not is_allowed_chat(message, bot_username):
@@ -1474,15 +1549,18 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     lower = text.lower()
     if "twitter.com" in lower or "x.com" in lower or "t.co" in lower:
-        increment_usage(user_id)
+        if not is_channel:
+            increment_usage(user_id)
         await download_twitter(update, context, text, is_channel=is_channel)
         return
     if "tiktok.com" in lower or "vt.tiktok.com" in lower or "vm.tiktok.com" in lower:
-        increment_usage(user_id)
+        if not is_channel:
+            increment_usage(user_id)
         await download_tiktok(update, context, text, is_channel=is_channel)
         return
     if "instagram.com" in lower:
-        increment_usage(user_id)
+        if not is_channel:
+            increment_usage(user_id)
         clean_url = re.sub(r"[?&](utm_|igshid|stkn|igsh)=[^&]+", "", text)
         clean_url = clean_url.split("?")[0].rstrip("/")
 
@@ -1624,14 +1702,35 @@ def main():
     app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    # channel posts (required — channel messages arrive as channel_post, not message)
-    app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST & (filters.PHOTO | filters.Document.IMAGE), handle_image))
-    app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST & (filters.VIDEO | filters.Document.VIDEO), handle_video))
-    app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST & filters.TEXT & ~filters.COMMAND, handle_text))
+    # channel posts — try UpdateType filter first
+    try:
+        app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST & (filters.PHOTO | filters.Document.IMAGE), handle_image))
+        app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST & (filters.VIDEO | filters.Document.VIDEO), handle_video))
+        app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST & filters.TEXT & ~filters.COMMAND, handle_text))
+        print("Registered CHANNEL_POST filters", flush=True)
+    except Exception as e:
+        print(f"UpdateType.CHANNEL_POST not available: {e}", flush=True)
+
+    # bulletproof fallback: catch ANY update that is a channel_post
+    async def channel_post_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        post = update.channel_post
+        if not post:
+            return
+        print(f"[ROUTER] channel_post from chat={post.chat.id}", flush=True)
+        if post.chat.id != CHANNEL_ID:
+            return
+        if post.photo or (post.document and post.document.mime_type and "image" in (post.document.mime_type or "")):
+            await handle_image(update, context)
+        elif post.video or (post.document and post.document.mime_type and "video" in (post.document.mime_type or "")):
+            await handle_video(update, context)
+        elif post.text:
+            await handle_text(update, context)
+
+    app.add_handler(TypeHandler(Update, channel_post_router), group=1)
 
     print("Bot started successfully...", flush=True)
     print(f"Channel mode active for ID: {CHANNEL_ID}", flush=True)
-    app.run_polling(drop_pending_updates=True)
+    app.run_polling(drop_pending_updates=True, allowed_updates=["message", "channel_post", "edited_channel_post"])
 
 if __name__ == "__main__":
     main()
