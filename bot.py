@@ -936,7 +936,7 @@ async def how(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Image handler — STRICT LIMIT + LOCK + CHANNEL
 # ------------------------------------------------------
 async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message
+    message = update.effective_message
     if not message:
         return
 
@@ -1004,7 +1004,7 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Video handler — STRICT LIMIT + LOCK + CHANNEL
 # ------------------------------------------------------
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message
+    message = update.effective_message
     if not message:
         return
 
@@ -1404,7 +1404,7 @@ async def download_twitter(update: Update, context: ContextTypes.DEFAULT_TYPE, u
 # Text handler
 # ------------------------------------------------------
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message
+    message = update.effective_message
     if not message or not message.text:
         return
     text = message.text.strip()
@@ -1618,9 +1618,17 @@ def main():
     app.add_handler(CommandHandler("freeuser", freeuser))
     app.add_handler(CommandHandler("removefree", removefree))
     app.add_handler(CommandHandler("status", status))
+
+    # normal chats + groups
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_image))
     app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+
+    # channel posts (required — channel messages arrive as channel_post, not message)
+    app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST & (filters.PHOTO | filters.Document.IMAGE), handle_image))
+    app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST & (filters.VIDEO | filters.Document.VIDEO), handle_video))
+    app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST & filters.TEXT & ~filters.COMMAND, handle_text))
+
     print("Bot started successfully...", flush=True)
     print(f"Channel mode active for ID: {CHANNEL_ID}", flush=True)
     app.run_polling(drop_pending_updates=True)
