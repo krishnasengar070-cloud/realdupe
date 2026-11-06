@@ -42,6 +42,9 @@ DATA_DIR = os.getenv("DATA_DIR", ".")
 DB_FILE = os.path.join(DATA_DIR, "bot_data.db")
 LIFETIME_FREE_FILE = os.path.join(DATA_DIR, "lifetime_free.json")
 
+# Channel where bot auto-processes everything and deletes the original after output
+CHANNEL_ID = -1004344831643
+
 HARDCODED_LIFETIME_FREE = [
     # example:
     # 123456789,
@@ -54,6 +57,24 @@ def get_user_lock(user_id: int) -> asyncio.Lock:
     if user_id not in user_locks:
         user_locks[user_id] = asyncio.Lock()
     return user_locks[user_id]
+
+
+def is_allowed_chat(message, bot_username: str = None) -> bool:
+    """Allow private chats, the configured channel, and groups only when mentioned/replied."""
+    if message.chat.id == CHANNEL_ID:
+        return True
+    if message.chat.type in ["group", "supergroup"]:
+        text = (message.caption or message.text or "").lower()
+        mentioned = bot_username and f"@{bot_username}" in text
+        is_reply = False
+        if message.reply_to_message and message.reply_to_message.from_user:
+            if (message.reply_to_message.from_user.is_bot and
+                message.reply_to_message.from_user.username and
+                message.reply_to_message.from_user.username.lower() == bot_username):
+                is_reply = True
+        return mentioned or is_reply
+    return True  # private chat
+
 
 # ------------------------------------------------------
 # Lifetime free JSON helpers
@@ -697,7 +718,8 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text += f"FFmpeg Installed: {'YES ✅' if shutil.which('ffmpeg') else 'NO ❌'}\n"
     text += f"Global Free Mode: {'ON ✅' if global_free else 'OFF (Daily limit active)'}\n"
     text += f"Daily Free Limit: {DAILY_FREE_LIMIT} (image + video + link)\n"
-    text += f"Data Dir: {DATA_DIR}\n\n"
+    text += f"Data Dir: {DATA_DIR}\n"
+    text += f"Channel ID: {CHANNEL_ID}\n\n"
     text += f"Lifetime Free Users ({len(free_list)}):\n"
     if free_list:
         for uid in free_list:
@@ -781,7 +803,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     add_custom("6203873525116183636")
     add_text(" Twitter/X link and I will download it in original quality.\n\n")
     add_text("🚨 Note: No tool can completely remove AI signatures from every file. Results vary by platform and content, but this bot works well on many images & videos.\n\n")
-    add_text("In groups: mention me with the photo, video or link.\n\n")
+    add_text("In groups: mention me with the photo, video or link.\n")
+    add_text("In the configured channel: just post — bot processes + deletes original.\n\n")
     add_text("Free users get 5 actions per day.\n")
     add_text("Unlimited → /buy (crypto only)\n\n")
     add_text("For any help contact @pvnuo ")
@@ -828,7 +851,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     add_text(" TikTok / ")
     add_custom("6203873525116183636")
     add_text(" Twitter/X link → download media in original quality\n\n")
-    add_text("In groups: mention me with the photo, video or link.\n\n")
+    add_text("In groups: mention me with the photo, video or link.\n")
+    add_text("In the channel: post anything — bot processes and deletes the original.\n\n")
     add_text("Free users get 5 actions per day (image + video + link).\n")
     add_text("For any help contact @pvnuo")
 
@@ -867,7 +891,8 @@ async def about(update: Update, context: ContextTypes.DEFAULT_TYPE):
     add_text(" TikTok or ")
     add_custom("6203873525116183636")
     add_text(" Twitter/X link and I will download the media in original quality.\n\n")
-    add_text("In groups: mention me with the photo, video or link.\n\n")
+    add_text("In groups: mention me with the photo, video or link.\n")
+    add_text("In the configured channel: post → process → original deleted.\n\n")
     add_text("For any help contact @pvnuo ")
     add_custom("6201528571756815592")
 
@@ -899,7 +924,8 @@ async def how(update: Update, context: ContextTypes.DEFAULT_TYPE):
     add_text("How it works:\n\n")
     add_text("1. Send a photo or video directly → bot cleans metadata + applies unique fingerprint (crop + texture overlay + speed + warm tone + fps) so platforms see it as original.\n")
     add_text("2. Send Instagram / TikTok / Twitter-X link → bot downloads original quality media.\n")
-    add_text("3. In groups you must mention the bot or reply to its message.\n\n")
+    add_text("3. In groups you must mention the bot or reply to its message.\n")
+    add_text("4. In the configured channel just post — bot processes and deletes the original message.\n\n")
     add_text("Free users get 5 actions/day. Unlimited plans available via /buy (crypto only).\n\n")
     add_text("For any help contact @pvnuo")
 
@@ -907,7 +933,7 @@ async def how(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, entities=entities, reply_markup=get_user_keyboard(update.effective_user.username if update.effective_user else None))
 
 # ------------------------------------------------------
-# Image handler — STRICT LIMIT + LOCK
+# Image handler — STRICT LIMIT + LOCK + CHANNEL
 # ------------------------------------------------------
 async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
@@ -917,6 +943,7 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = user.id if user else 0
     username = user.username if user else None
+    is_channel = message.chat.id == CHANNEL_ID
 
     lock = get_user_lock(user_id)
     async with lock:
@@ -929,18 +956,9 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        if message.chat.type in ["group", "supergroup"]:
-            bot_username = (await context.bot.get_me()).username.lower()
-            caption = (message.caption or "").lower()
-            mentioned = f"@{bot_username}" in caption
-            is_reply = False
-            if message.reply_to_message and message.reply_to_message.from_user:
-                if (message.reply_to_message.from_user.is_bot and
-                    message.reply_to_message.from_user.username and
-                    message.reply_to_message.from_user.username.lower() == bot_username):
-                    is_reply = True
-            if not mentioned and not is_reply:
-                return
+        bot_username = (await context.bot.get_me()).username.lower()
+        if not is_allowed_chat(message, bot_username):
+            return
 
         status_msg = await message.reply_text("⌛")
         start_time = time.time()
@@ -970,6 +988,11 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await status_msg.delete()
             except Exception:
                 pass
+            if is_channel:
+                try:
+                    await message.delete()
+                except Exception:
+                    pass
         except Exception as e:
             print(f"Image error: {e}", flush=True)
             try:
@@ -978,7 +1001,7 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await message.reply_text("❌ Failed to process the image.")
 
 # ------------------------------------------------------
-# Video handler — STRICT LIMIT + LOCK
+# Video handler — STRICT LIMIT + LOCK + CHANNEL
 # ------------------------------------------------------
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
@@ -988,6 +1011,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = user.id if user else 0
     username = user.username if user else None
+    is_channel = message.chat.id == CHANNEL_ID
 
     lock = get_user_lock(user_id)
     async with lock:
@@ -1000,18 +1024,9 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        if message.chat.type in ["group", "supergroup"]:
-            bot_username = (await context.bot.get_me()).username.lower()
-            caption = (message.caption or "").lower()
-            mentioned = f"@{bot_username}" in caption
-            is_reply = False
-            if message.reply_to_message and message.reply_to_message.from_user:
-                if (message.reply_to_message.from_user.is_bot and
-                    message.reply_to_message.from_user.username and
-                    message.reply_to_message.from_user.username.lower() == bot_username):
-                    is_reply = True
-            if not mentioned and not is_reply:
-                return
+        bot_username = (await context.bot.get_me()).username.lower()
+        if not is_allowed_chat(message, bot_username):
+            return
 
         status_msg = await message.reply_text("⌛")
 
@@ -1051,6 +1066,11 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         await status_msg.delete()
                     except Exception:
                         pass
+                    if is_channel:
+                        try:
+                            await message.delete()
+                        except Exception:
+                            pass
                 else:
                     await status_msg.edit_text("❌ Failed to send the video.")
             else:
@@ -1116,7 +1136,7 @@ def download_instagram(url: str, unique_id: str):
         print(f"Download post error: {e}", flush=True)
     return paths
 
-async def download_tiktok(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str):
+async def download_tiktok(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str, is_channel: bool = False):
     text_parts = []
     entities = []
     current_offset = 0
@@ -1216,6 +1236,11 @@ async def download_tiktok(update: Update, context: ContextTypes.DEFAULT_TYPE, ur
                 await status_emoji.delete()
             except Exception:
                 pass
+            if is_channel:
+                try:
+                    await update.message.delete()
+                except Exception:
+                    pass
         else:
             try:
                 await status_text.edit_text("❌ Failed to download. Make sure the link is public.")
@@ -1241,7 +1266,7 @@ async def download_tiktok(update: Update, context: ContextTypes.DEFAULT_TYPE, ur
             except Exception:
                 pass
 
-async def download_twitter(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str):
+async def download_twitter(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str, is_channel: bool = False):
     text_parts = []
     entities = []
     current_offset = 0
@@ -1345,6 +1370,11 @@ async def download_twitter(update: Update, context: ContextTypes.DEFAULT_TYPE, u
                 await status_emoji.delete()
             except Exception:
                 pass
+            if is_channel:
+                try:
+                    await update.message.delete()
+                except Exception:
+                    pass
         else:
             try:
                 await status_text.edit_text("❌ Failed to download. Make sure the link is public.")
@@ -1381,6 +1411,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = user.id if user else 0
     username = user.username if user else None
+    is_channel = message.chat.id == CHANNEL_ID
 
     if text == "How to use":
         await how(update, context)
@@ -1425,7 +1456,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• Just send me any image or video and I will give you a cleaned unique version.\n"
             "• The changes help reduce AI labels and unoriginal content strikes while keeping high visual quality.\n"
             "• You can also send any Instagram, TikTok or Twitter/X link and I will download the media for you in original quality.\n\n"
-            "In groups: You must mention me with the photo, video or link.\n\n"
+            "In groups: You must mention me with the photo, video or link.\n"
+            "In the channel: just post — bot processes and deletes the original.\n\n"
             "For any help contact @pvnuo",
             reply_markup=get_user_keyboard(username)
         )
@@ -1436,26 +1468,18 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text(limit_msg)
         return
 
-    if message.chat.type in ["group", "supergroup"]:
-        bot_username = (await context.bot.get_me()).username.lower()
-        mentioned = f"@{bot_username}" in text.lower()
-        is_reply = False
-        if message.reply_to_message and message.reply_to_message.from_user:
-            if (message.reply_to_message.from_user.is_bot and
-                message.reply_to_message.from_user.username and
-                message.reply_to_message.from_user.username.lower() == bot_username):
-                is_reply = True
-        if not mentioned and not is_reply:
-            return
+    bot_username = (await context.bot.get_me()).username.lower()
+    if not is_allowed_chat(message, bot_username):
+        return
 
     lower = text.lower()
     if "twitter.com" in lower or "x.com" in lower or "t.co" in lower:
         increment_usage(user_id)
-        await download_twitter(update, context, text)
+        await download_twitter(update, context, text, is_channel=is_channel)
         return
     if "tiktok.com" in lower or "vt.tiktok.com" in lower or "vm.tiktok.com" in lower:
         increment_usage(user_id)
-        await download_tiktok(update, context, text)
+        await download_tiktok(update, context, text, is_channel=is_channel)
         return
     if "instagram.com" in lower:
         increment_usage(user_id)
@@ -1530,6 +1554,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await status_emoji.delete()
                 except Exception:
                     pass
+                if is_channel:
+                    try:
+                        await message.delete()
+                    except Exception:
+                        pass
             else:
                 try:
                     await status_text.edit_text("❌ Failed. Make sure link is public.")
@@ -1593,6 +1622,7 @@ def main():
     app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     print("Bot started successfully...", flush=True)
+    print(f"Channel mode active for ID: {CHANNEL_ID}", flush=True)
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
