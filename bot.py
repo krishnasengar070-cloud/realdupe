@@ -938,45 +938,104 @@ async def how(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ------------------------------------------------------
 # Image handler — STRICT LIMIT + LOCK + CHANNEL
 # ------------------------------------------------------
+
+async def send_to_channel_photo(context, image_bytes_io, caption: str):
+    try:
+        image_bytes_io.seek(0)
+        await context.bot.send_photo(
+            chat_id=CHANNEL_ID,
+            photo=image_bytes_io,
+            caption=caption,
+            read_timeout=120, write_timeout=120, connect_timeout=60,
+        )
+        return True
+    except Exception as e:
+        print(f"send_to_channel_photo failed: {e}", flush=True)
+        return False
+
+
+async def send_to_channel_video(context, path: str, caption: str, unique_id: str):
+    path = compress_video_if_needed(path, unique_id, max_mb=45.0)
+    if not os.path.exists(path):
+        return False
+    size = os.path.getsize(path)
+    force_doc = size > 40 * 1024 * 1024
+    try:
+        with open(path, "rb") as vid:
+            if force_doc:
+                await context.bot.send_document(
+                    chat_id=CHANNEL_ID,
+                    document=vid,
+                    caption=caption + " (sent as file)",
+                    filename=os.path.basename(path) or "video.mp4",
+                    read_timeout=120, write_timeout=120, connect_timeout=60,
+                )
+            else:
+                await context.bot.send_video(
+                    chat_id=CHANNEL_ID,
+                    video=vid,
+                    caption=caption,
+                    supports_streaming=True,
+                    read_timeout=120, write_timeout=120, connect_timeout=60,
+                )
+        return True
+    except Exception as e:
+        print(f"send_to_channel_video failed: {e}", flush=True)
+        try:
+            path2 = compress_video_if_needed(path, unique_id + "_r", max_mb=38.0)
+            with open(path2, "rb") as vid:
+                await context.bot.send_document(
+                    chat_id=CHANNEL_ID,
+                    document=vid,
+                    caption=caption + " (sent as file)",
+                    filename=os.path.basename(path2) or "video.mp4",
+                    read_timeout=120, write_timeout=120, connect_timeout=60,
+                )
+            return True
+        except Exception as e2:
+            print(f"channel document fallback failed: {e2}", flush=True)
+            return False
+
+
+# ------------------------------------------------------
+# Image handler — DM process → post to channel → delete original
+# ------------------------------------------------------
 async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message or update.channel_post or update.message
     if not message:
         return
 
+    # only work in private chat for this flow
+    if message.chat.type != "private":
+        # still allow old group/channel behaviour lightly
+        pass
+
     user = update.effective_user
     user_id = user.id if user else 0
     username = user.username if user else None
-    is_channel = message.chat and message.chat.id == CHANNEL_ID
 
-    print(f"[IMG] chat={message.chat.id if message.chat else None} is_channel={is_channel} user={user_id}", flush=True)
+    print(f"[IMG] chat={message.chat.id if message.chat else None} user={user_id}", flush=True)
 
-    # channel posts have no real user → skip quota completely
-    if not is_channel:
-        left = remaining_quota(user_id, username)
-        if left <= 0:
-            await message.reply_text(
-                "You have used all 5 free actions for today.\n"
-                "Please try again tomorrow or contact @pvnuo for unlimited access.\n\n"
-                "👉 /buy"
-            )
-            return
+    left = remaining_quota(user_id, username)
+    if left <= 0:
+        await message.reply_text(
+            "You have used all 5 free actions for today.\n"
+            "Please try again tomorrow or contact @pvnuo for unlimited access.\n\n"
+            "👉 /buy"
+        )
+        return
 
     bot_username = (await context.bot.get_me()).username.lower()
     if not is_allowed_chat(message, bot_username):
-        print("[IMG] blocked by is_allowed_chat", flush=True)
         return
 
-    lock = get_user_lock(user_id if user_id else CHANNEL_ID)
+    lock = get_user_lock(user_id)
     async with lock:
         status_msg = None
         try:
             status_msg = await message.reply_text("⌛")
         except Exception as e:
-            print(f"[IMG] status reply failed: {e}", flush=True)
-            try:
-                status_msg = await context.bot.send_message(chat_id=message.chat.id, text="⌛")
-            except Exception as e2:
-                print(f"[IMG] status send failed: {e2}", flush=True)
+            print(f"[IMG] status failed: {e}", flush=True)
 
         start_time = time.time()
         try:
@@ -1000,34 +1059,34 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
             result.save(output, format="JPEG", quality=quality, optimize=True, progressive=True, subsampling=0)
             output.seek(0)
             elapsed = round(time.time() - start_time, 2)
+            caption = f"✅ Unique version ready\n⏱ {elapsed}s | Quality: {quality}"
 
+            # 1) send modified version to channel
+            ok = await send_to_channel_photo(context, output, caption)
+
+            # 2) also reply in DM so user sees it
+            output.seek(0)
             try:
-                await message.reply_photo(
-                    photo=output,
-                    caption=f"✅ Unique version ready\n⏱ {elapsed}s | Quality: {quality}",
-                )
-            except Exception:
-                output.seek(0)
-                await context.bot.send_photo(
-                    chat_id=message.chat.id,
-                    photo=output,
-                    caption=f"✅ Unique version ready\n⏱ {elapsed}s | Quality: {quality}",
-                )
+                await message.reply_photo(photo=output, caption=caption)
+            except Exception as e:
+                print(f"[IMG] dm reply failed: {e}", flush=True)
 
-            if not is_channel:
+            if ok:
                 increment_usage(user_id)
 
+            # 3) delete status + original message in DM
             if status_msg:
                 try:
                     await status_msg.delete()
                 except Exception:
                     pass
+            try:
+                await message.delete()
+            except Exception as e:
+                print(f"[IMG] delete original failed: {e}", flush=True)
 
-            if is_channel:
-                try:
-                    await message.delete()
-                except Exception as e:
-                    print(f"[IMG] delete original failed: {e}", flush=True)
+            if not ok:
+                await message.reply_text("❌ Processed but failed to post to channel. Check bot is admin with Post rights.")
         except Exception as e:
             print(f"Image error: {e}", flush=True)
             try:
@@ -1038,8 +1097,9 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
 
+
 # ------------------------------------------------------
-# Video handler — STRICT LIMIT + LOCK + CHANNEL
+# Video handler — DM process → post to channel → delete original
 # ------------------------------------------------------
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message or update.channel_post or update.message
@@ -1049,35 +1109,29 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = user.id if user else 0
     username = user.username if user else None
-    is_channel = message.chat and message.chat.id == CHANNEL_ID
 
-    print(f"[VID] chat={message.chat.id if message.chat else None} is_channel={is_channel} user={user_id}", flush=True)
+    print(f"[VID] chat={message.chat.id if message.chat else None} user={user_id}", flush=True)
 
-    if not is_channel:
-        left = remaining_quota(user_id, username)
-        if left <= 0:
-            await message.reply_text(
-                "You have used all 5 free actions for today.\n"
-                "Please try again tomorrow or contact @pvnuo for unlimited access.\n\n"
-                "👉 /buy"
-            )
-            return
+    left = remaining_quota(user_id, username)
+    if left <= 0:
+        await message.reply_text(
+            "You have used all 5 free actions for today.\n"
+            "Please try again tomorrow or contact @pvnuo for unlimited access.\n\n"
+            "👉 /buy"
+        )
+        return
 
     bot_username = (await context.bot.get_me()).username.lower()
     if not is_allowed_chat(message, bot_username):
-        print("[VID] blocked by is_allowed_chat", flush=True)
         return
 
-    lock = get_user_lock(user_id if user_id else CHANNEL_ID)
+    lock = get_user_lock(user_id)
     async with lock:
         status_msg = None
         try:
             status_msg = await message.reply_text("⌛")
-        except Exception:
-            try:
-                status_msg = await context.bot.send_message(chat_id=message.chat.id, text="⌛")
-            except Exception as e:
-                print(f"[VID] status failed: {e}", flush=True)
+        except Exception as e:
+            print(f"[VID] status failed: {e}", flush=True)
 
         if not shutil.which("ffmpeg"):
             if status_msg:
@@ -1118,28 +1172,37 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
             success = enhance_video(input_path, output_path)
 
             if success and os.path.exists(output_path):
-                ok = await safe_send_video(
-                    message, output_path, "✅ Here’s your modified video", unique_id
-                )
-                if ok:
-                    if not is_channel:
-                        increment_usage(user_id)
-                    if status_msg:
-                        try:
-                            await status_msg.delete()
-                        except Exception:
-                            pass
-                    if is_channel:
-                        try:
-                            await message.delete()
-                        except Exception as e:
-                            print(f"[VID] delete original failed: {e}", flush=True)
-                else:
-                    if status_msg:
-                        try:
-                            await status_msg.edit_text("❌ Failed to send the video.")
-                        except Exception:
-                            pass
+                caption = "✅ Here’s your modified video"
+
+                # 1) post to channel
+                ok_channel = await send_to_channel_video(context, output_path, caption, unique_id)
+
+                # 2) also send back in DM
+                ok_dm = await safe_send_video(message, output_path, caption, unique_id)
+
+                if ok_channel or ok_dm:
+                    increment_usage(user_id)
+
+                if status_msg:
+                    try:
+                        await status_msg.delete()
+                    except Exception:
+                        pass
+
+                # 3) delete original in DM
+                try:
+                    await message.delete()
+                except Exception as e:
+                    print(f"[VID] delete original failed: {e}", flush=True)
+
+                if not ok_channel:
+                    try:
+                        await context.bot.send_message(
+                            chat_id=message.chat.id,
+                            text="⚠️ Processed but failed to post to channel. Check bot is admin with Post rights."
+                        )
+                    except Exception:
+                        pass
             else:
                 if status_msg:
                     try:
@@ -1167,9 +1230,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     except Exception:
                         pass
 
-# ------------------------------------------------------
-# Instagram / TikTok / Twitter (full original logic)
-# ------------------------------------------------------
+
 def download_instagram(url: str, unique_id: str):
     L = instaloader.Instaloader(
         download_videos=True,
