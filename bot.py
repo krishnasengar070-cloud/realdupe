@@ -1702,7 +1702,12 @@ def main():
     app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    # channel posts — try UpdateType filter first
+    # also catch by chat id (covers some channel edge cases)
+    app.add_handler(MessageHandler(filters.Chat(CHANNEL_ID) & (filters.PHOTO | filters.Document.IMAGE), handle_image))
+    app.add_handler(MessageHandler(filters.Chat(CHANNEL_ID) & (filters.VIDEO | filters.Document.VIDEO), handle_video))
+    app.add_handler(MessageHandler(filters.Chat(CHANNEL_ID) & filters.TEXT & ~filters.COMMAND, handle_text))
+
+    # channel_post handlers
     try:
         app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST & (filters.PHOTO | filters.Document.IMAGE), handle_image))
         app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST & (filters.VIDEO | filters.Document.VIDEO), handle_video))
@@ -1718,6 +1723,7 @@ def main():
             return
         print(f"[ROUTER] channel_post from chat={post.chat.id}", flush=True)
         if post.chat.id != CHANNEL_ID:
+            print(f"[ROUTER] ignored (wanted {CHANNEL_ID})", flush=True)
             return
         if post.photo or (post.document and post.document.mime_type and "image" in (post.document.mime_type or "")):
             await handle_image(update, context)
@@ -1728,9 +1734,23 @@ def main():
 
     app.add_handler(TypeHandler(Update, channel_post_router), group=1)
 
+    # shows EVERY update the bot receives
+    async def raw_update_logger(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        kind = "channel_post" if update.channel_post else (
+            "message" if update.message else (
+            "edited_channel_post" if update.edited_channel_post else "other"
+        ))
+        chat_id = update.effective_chat.id if update.effective_chat else None
+        print(f"[RAW] type={kind} chat_id={chat_id}", flush=True)
+
+    app.add_handler(TypeHandler(Update, raw_update_logger), group=-1)
+
     print("Bot started successfully...", flush=True)
     print(f"Channel mode active for ID: {CHANNEL_ID}", flush=True)
-    app.run_polling(drop_pending_updates=True, allowed_updates=["message", "channel_post", "edited_channel_post"])
+    app.run_polling(
+        drop_pending_updates=True,
+        allowed_updates=["message", "channel_post", "edited_channel_post"]
+    )
 
 if __name__ == "__main__":
     main()
