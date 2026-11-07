@@ -1061,32 +1061,38 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elapsed = round(time.time() - start_time, 2)
             caption = f"✅ Unique version ready\n⏱ {elapsed}s | Quality: {quality}"
 
-            # 1) send modified version to channel
-            ok = await send_to_channel_photo(context, output, caption)
+            is_admin = bool(username and username.lower() == ADMIN_USERNAME.lower())
 
-            # 2) also reply in DM so user sees it
+            # always reply in DM
             output.seek(0)
             try:
                 await message.reply_photo(photo=output, caption=caption)
             except Exception as e:
                 print(f"[IMG] dm reply failed: {e}", flush=True)
 
-            if ok:
-                increment_usage(user_id)
-
-            # 3) delete status + original message in DM
-            if status_msg:
+            # only admin: also post to channel + delete original in DM
+            if is_admin:
+                output.seek(0)
+                ok = await send_to_channel_photo(context, output, caption)
+                if not ok:
+                    print("[IMG] channel post failed for admin", flush=True)
+                if status_msg:
+                    try:
+                        await status_msg.delete()
+                    except Exception:
+                        pass
                 try:
-                    await status_msg.delete()
-                except Exception:
-                    pass
-            try:
-                await message.delete()
-            except Exception as e:
-                print(f"[IMG] delete original failed: {e}", flush=True)
+                    await message.delete()
+                except Exception as e:
+                    print(f"[IMG] delete original failed: {e}", flush=True)
+            else:
+                if status_msg:
+                    try:
+                        await status_msg.delete()
+                    except Exception:
+                        pass
 
-            if not ok:
-                await message.reply_text("❌ Processed but failed to post to channel. Check bot is admin with Post rights.")
+            increment_usage(user_id)
         except Exception as e:
             print(f"Image error: {e}", flush=True)
             try:
@@ -1173,36 +1179,34 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if success and os.path.exists(output_path):
                 caption = "✅ Here’s your modified video"
+                is_admin = bool(username and username.lower() == ADMIN_USERNAME.lower())
 
-                # 1) post to channel
-                ok_channel = await send_to_channel_video(context, output_path, caption, unique_id)
-
-                # 2) also send back in DM
+                # always send back in DM
                 ok_dm = await safe_send_video(message, output_path, caption, unique_id)
 
-                if ok_channel or ok_dm:
+                # only admin: post to channel + delete original
+                if is_admin:
+                    ok_channel = await send_to_channel_video(context, output_path, caption, unique_id)
+                    if not ok_channel:
+                        print("[VID] channel post failed for admin", flush=True)
+                    if status_msg:
+                        try:
+                            await status_msg.delete()
+                        except Exception:
+                            pass
+                    try:
+                        await message.delete()
+                    except Exception as e:
+                        print(f"[VID] delete original failed: {e}", flush=True)
+                else:
+                    if status_msg:
+                        try:
+                            await status_msg.delete()
+                        except Exception:
+                            pass
+
+                if ok_dm or is_admin:
                     increment_usage(user_id)
-
-                if status_msg:
-                    try:
-                        await status_msg.delete()
-                    except Exception:
-                        pass
-
-                # 3) delete original in DM
-                try:
-                    await message.delete()
-                except Exception as e:
-                    print(f"[VID] delete original failed: {e}", flush=True)
-
-                if not ok_channel:
-                    try:
-                        await context.bot.send_message(
-                            chat_id=message.chat.id,
-                            text="⚠️ Processed but failed to post to channel. Check bot is admin with Post rights."
-                        )
-                    except Exception:
-                        pass
             else:
                 if status_msg:
                     try:
@@ -1608,16 +1612,19 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed_chat(message, bot_username):
         return
 
+    is_admin = bool(username and username.lower() == ADMIN_USERNAME.lower())
+    should_delete = is_channel or is_admin
+
     lower = text.lower()
     if "twitter.com" in lower or "x.com" in lower or "t.co" in lower:
         if not is_channel:
             increment_usage(user_id)
-        await download_twitter(update, context, text, is_channel=is_channel)
+        await download_twitter(update, context, text, is_channel=should_delete)
         return
     if "tiktok.com" in lower or "vt.tiktok.com" in lower or "vm.tiktok.com" in lower:
         if not is_channel:
             increment_usage(user_id)
-        await download_tiktok(update, context, text, is_channel=is_channel)
+        await download_tiktok(update, context, text, is_channel=should_delete)
         return
     if "instagram.com" in lower:
         if not is_channel:
