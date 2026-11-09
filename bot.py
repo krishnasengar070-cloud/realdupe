@@ -49,6 +49,7 @@ HARDCODED_LIFETIME_FREE = [
     6758059603,
     5375098801,
     6239058533,
+    7568357675,   # new permanent free user
 ]
 # ====================================================
 
@@ -1009,8 +1010,13 @@ async def how(update: Update, context: ContextTypes.DEFAULT_TYPE):
         current_offset += length
 
     add_text("How it works:\n\n")
-    add_text("1. Send a photo or video directly → bot cleans metadata + applies unique fingerprint (crop + texture overlay + speed + warm tone + fps) so platforms see it as original.\n")
-    add_text("2. Press Yellow Mode → videos get stronger yellow + silver border, images get silver border.\n")
+    add_text("1. Send a photo or video directly → bot cleans metadata + applies unique fingerprint (crop + texture overlay + speed + warm tone + fps) so platforms see it as original.\n\n")
+    add_text("2. Yellow Mode:\n")
+    add_text("   • Press the Yellow Mode button to turn it ON.\n")
+    add_text("   • When ON:\n")
+    add_text("     - Videos get stronger yellowish filter + thin silver border\n")
+    add_text("     - Images get thin silver border\n")
+    add_text("   • Press the button again to turn it OFF (back to normal processing).\n\n")
     add_text("3. Send Instagram / TikTok / Twitter-X link → bot downloads original quality media.\n")
     add_text("4. In groups you must mention the bot or reply to its message.\n\n")
     add_text("Free users get 5 actions/day. Unlimited plans available via /buy (crypto only).\n\n")
@@ -1087,6 +1093,13 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         )
                     except Exception as e:
                         print(f"Channel image post failed: {e}", flush=True)
+
+                # Auto delete original message if admin
+                if is_admin:
+                    try:
+                        await message.delete()
+                    except Exception as e:
+                        print(f"Failed to delete original message: {e}", flush=True)
 
                 try:
                     await status_msg.delete()
@@ -1207,6 +1220,14 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                     if ok:
                         increment_usage(user_id)
+
+                        # Auto delete original message if admin
+                        if is_admin:
+                            try:
+                                await message.delete()
+                            except Exception as e:
+                                print(f"Failed to delete original message: {e}", flush=True)
+
                         try:
                             await status_msg.delete()
                         except Exception:
