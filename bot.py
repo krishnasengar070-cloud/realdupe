@@ -46,10 +46,12 @@ LIFETIME_FREE_FILE = os.path.join(DATA_DIR, "lifetime_free.json")
 CHANNEL_ID = -1004344831643
 
 HARDCODED_LIFETIME_FREE = [
-    6758059603,
     5375098801,
     6239058533,
-    7568357675,   # new permanent free user
+    6758059603,
+    7568357675,
+    7702852287,
+    8039553042,
 ]
 # ====================================================
 
@@ -345,7 +347,7 @@ def create_noise_texture(width: int, height: int, unique_id: str) -> str:
     return path
 
 # ------------------------------------------------------
-# Image enhance (Silver Border only when Yellow Mode ON)
+# Image enhance
 # ------------------------------------------------------
 def enhance_image(image: Image.Image, mode: str = "normal") -> Image.Image:
     if image.mode != "RGB":
@@ -398,7 +400,6 @@ def enhance_image(image: Image.Image, mode: str = "normal") -> Image.Image:
     texture = ImageEnhance.Brightness(texture).enhance(random.uniform(0.4, 0.7))
     image = Image.blend(image, texture, random.uniform(0.025, 0.055))
 
-    # ===== Silver Border ONLY when Yellow Mode is ON =====
     if mode == "mirror_yellow":
         border_size = random.randint(5, 9)
         silver = (192, 192, 192)
@@ -410,7 +411,7 @@ def enhance_image(image: Image.Image, mode: str = "normal") -> Image.Image:
     return Image.open(out).convert("RGB")
 
 # ------------------------------------------------------
-# Video enhance - FIXED (Audio lag + Glitch fixed)
+# Video enhance
 # ------------------------------------------------------
 def enhance_video(input_path: str, output_path: str, mode: str = "normal") -> bool:
     if not shutil.which("ffmpeg"):
@@ -460,7 +461,6 @@ def enhance_video(input_path: str, output_path: str, mode: str = "normal") -> bo
             ss = 0.0
             t = max(duration, 0.1)
 
-        # Very mild speed change to avoid audio lag
         speed = random.uniform(0.992, 1.008)
         setpts = 1.0 / speed
         crop_pct = random.uniform(0.012, 0.028)
@@ -490,13 +490,12 @@ def enhance_video(input_path: str, output_path: str, mode: str = "normal") -> bo
             f"fps={target_fps},"
             f"eq=contrast={contrast}:brightness={brightness}:saturation={saturation},"
             f"colorbalance=rs={warm_rs}:gs={warm_gs}:bs=-0.03,"
-            f"unsharp=3:3:0.3:2:2:0.15,"
+            f"unsharp=5:5:0.4:5:5:0.0,"
             f"noise=alls={noise_str}:allf=t,"
             f"{pad_part}"
             f"format=yuv420p"
         )
 
-        # Clean audio handling to prevent lag
         cmd1 = [
             "ffmpeg", "-y",
             "-i", input_path,
@@ -862,7 +861,7 @@ def get_user_keyboard(username: str = None):
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 # ------------------------------------------------------
-# Commands (FULL LONG VERSION with custom emoji)
+# Commands
 # ------------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text_parts = []
@@ -1341,7 +1340,7 @@ def download_instagram(url: str, unique_id: str):
     return paths
 
 # ------------------------------------------------------
-# TikTok Download (FULL)
+# TikTok Download
 # ------------------------------------------------------
 async def download_tiktok(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str, is_channel: bool = False):
     text_parts = []
@@ -1474,7 +1473,7 @@ async def download_tiktok(update: Update, context: ContextTypes.DEFAULT_TYPE, ur
                 pass
 
 # ------------------------------------------------------
-# Twitter / X Download (FULL)
+# Twitter / X Download
 # ------------------------------------------------------
 async def download_twitter(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str, is_channel: bool = False):
     text_parts = []
@@ -1660,7 +1659,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Yellow Mode toggle (English only)
     if text == "Yellow Mode":
         current = get_user_mode(user_id)
         if current == "mirror_yellow":
