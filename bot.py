@@ -632,7 +632,7 @@ def compress_video_if_needed(path: str, unique_id: str, max_mb: float = 45.0) ->
             print(f"compress pass {i}: {e}", flush=True)
     return current
 
-async def safe_send_video(message, path: str, caption: str, unique_id: str):
+async def safe_send_video(message, path: str, caption: str, unique_id: str, also_to_channel: bool = False, context=None):
     path = compress_video_if_needed(path, unique_id, max_mb=45.0)
     if not os.path.exists(path):
         return False
@@ -652,6 +652,30 @@ async def safe_send_video(message, path: str, caption: str, unique_id: str):
                     video=vid, caption=caption, supports_streaming=True,
                     read_timeout=120, write_timeout=120, connect_timeout=60,
                 )
+        
+        # Auto post to channel
+        if also_to_channel and context:
+            try:
+                with open(path, "rb") as vid2:
+                    if force_doc:
+                        await context.bot.send_document(
+                            chat_id=CHANNEL_ID,
+                            document=vid2,
+                            caption=caption,
+                            filename=os.path.basename(path) or "video.mp4",
+                            read_timeout=120, write_timeout=120, connect_timeout=60,
+                        )
+                    else:
+                        await context.bot.send_video(
+                            chat_id=CHANNEL_ID,
+                            video=vid2,
+                            caption=caption,
+                            supports_streaming=True,
+                            read_timeout=120, write_timeout=120, connect_timeout=60,
+                        )
+            except Exception as e:
+                print(f"Channel video post failed: {e}", flush=True)
+        
         return True
     except Exception as e:
         print(f"safe_send_video first try: {e}", flush=True)
@@ -664,6 +688,17 @@ async def safe_send_video(message, path: str, caption: str, unique_id: str):
                     filename=os.path.basename(path2) or "video.mp4",
                     read_timeout=120, write_timeout=120, connect_timeout=60,
                 )
+            if also_to_channel and context:
+                try:
+                    with open(path2, "rb") as vid2:
+                        await context.bot.send_document(
+                            chat_id=CHANNEL_ID,
+                            document=vid2,
+                            caption=caption,
+                            filename=os.path.basename(path2) or "video.mp4",
+                        )
+                except Exception:
+                    pass
             return True
         except Exception as e2:
             print(f"document fallback failed: {e2}", flush=True)
@@ -1039,6 +1074,18 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     caption=f"✅ Unique version ready\n⏱ {elapsed}s | Quality: {quality}",
                 )
                 increment_usage(user_id)
+
+                # Auto post to channel
+                try:
+                    output.seek(0)
+                    await context.bot.send_photo(
+                        chat_id=CHANNEL_ID,
+                        photo=output,
+                        caption=f"✅ Unique version ready | Quality: {quality}"
+                    )
+                except Exception as e:
+                    print(f"Channel image post failed: {e}", flush=True)
+
                 try:
                     await status_msg.delete()
                 except Exception:
@@ -1149,7 +1196,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     caption = "✅ Yellow Mode + Silver Border applied"
 
                 if success and os.path.exists(output_path):
-                    ok = await safe_send_video(message, output_path, caption, unique_id)
+                    ok = await safe_send_video(message, output_path, caption, unique_id, also_to_channel=True, context=context)
                     if ok:
                         increment_usage(user_id)
                         try:
