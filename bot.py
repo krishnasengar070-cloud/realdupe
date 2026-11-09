@@ -410,7 +410,7 @@ def enhance_image(image: Image.Image, mode: str = "normal") -> Image.Image:
     return Image.open(out).convert("RGB")
 
 # ------------------------------------------------------
-# Video enhance (Yellow + Silver Border when mode ON, NO mirror)
+# Video enhance - FIXED (Audio lag + Glitch fixed)
 # ------------------------------------------------------
 def enhance_video(input_path: str, output_path: str, mode: str = "normal") -> bool:
     if not shutil.which("ffmpeg"):
@@ -451,8 +451,8 @@ def enhance_video(input_path: str, output_path: str, mode: str = "normal") -> bo
     try:
         texture_path = create_noise_texture(min(width, 640), min(height, 360), unique_id)
 
-        trim_start = random.uniform(0.45, 0.75)
-        trim_end = random.uniform(0.45, 0.75)
+        trim_start = random.uniform(0.40, 0.70)
+        trim_end = random.uniform(0.40, 0.70)
         if duration > (trim_start + trim_end + 2.5):
             ss = trim_start
             t = duration - trim_start - trim_end
@@ -460,25 +460,25 @@ def enhance_video(input_path: str, output_path: str, mode: str = "normal") -> bo
             ss = 0.0
             t = max(duration, 0.1)
 
-        speed = random.uniform(0.975, 1.025)
+        # Very mild speed change to avoid audio lag
+        speed = random.uniform(0.992, 1.008)
         setpts = 1.0 / speed
-        crop_pct = random.uniform(0.015, 0.032)
-        target_fps = random.choice([23.976, 24, 25, 29.97, 30])
-        contrast = random.uniform(1.01, 1.04)
-        brightness = random.uniform(-0.005, 0.012)
-        saturation = random.uniform(0.99, 1.04)
-        noise_str = random.randint(3, 7)
-        overlay_opacity = random.uniform(0.04, 0.085)
+        crop_pct = random.uniform(0.012, 0.028)
+        target_fps = random.choice([24, 25, 29.97, 30])
+        contrast = random.uniform(1.01, 1.035)
+        brightness = random.uniform(-0.004, 0.010)
+        saturation = random.uniform(0.99, 1.03)
+        noise_str = random.randint(2, 5)
+        overlay_opacity = random.uniform(0.035, 0.075)
 
-        # Stronger yellow + silver border only when mode ON
         if mode == "mirror_yellow":
-            warm_rs = random.uniform(0.18, 0.28)
-            warm_gs = random.uniform(0.08, 0.15)
+            warm_rs = random.uniform(0.17, 0.26)
+            warm_gs = random.uniform(0.07, 0.13)
             border = random.randint(6, 10)
             pad_part = f"pad=iw+{border*2}:ih+{border*2}:{border}:{border}:color=0xC0C0C0,"
         else:
-            warm_rs = random.uniform(0.03, 0.08)
-            warm_gs = random.uniform(0.01, 0.04)
+            warm_rs = random.uniform(0.03, 0.07)
+            warm_gs = random.uniform(0.01, 0.035)
             pad_part = ""
 
         vf = (
@@ -489,13 +489,14 @@ def enhance_video(input_path: str, output_path: str, mode: str = "normal") -> bo
             f"setpts={setpts}*PTS,"
             f"fps={target_fps},"
             f"eq=contrast={contrast}:brightness={brightness}:saturation={saturation},"
-            f"colorbalance=rs={warm_rs}:gs={warm_gs}:bs=-0.04,"
-            f"unsharp=3:3:0.4:2:2:0.2,"
+            f"colorbalance=rs={warm_rs}:gs={warm_gs}:bs=-0.03,"
+            f"unsharp=3:3:0.3:2:2:0.15,"
             f"noise=alls={noise_str}:allf=t,"
             f"{pad_part}"
             f"format=yuv420p"
         )
 
+        # Clean audio handling to prevent lag
         cmd1 = [
             "ffmpeg", "-y",
             "-i", input_path,
@@ -507,17 +508,20 @@ def enhance_video(input_path: str, output_path: str, mode: str = "normal") -> bo
             "-threads", "2",
             "-crf", "18",
             "-c:a", "aac",
-            "-b:a", "192k",
+            "-b:a", "160k",
+            "-ar", "44100",
+            "-ac", "2",
             "-af", f"atempo={speed}",
             "-movflags", "+faststart",
             "-pix_fmt", "yuv420p",
             "-vf", vf,
+            "-max_muxing_queue_size", "9999",
             temp_path
         ]
         result1 = subprocess.run(cmd1, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=600, text=True)
         if result1.returncode != 0 or not os.path.exists(temp_path):
             print("===== FFMPEG ERROR (main) =====", flush=True)
-            print(result1.stderr[-2500:] if result1.stderr else "No stderr", flush=True)
+            print(result1.stderr[-2000:] if result1.stderr else "No stderr", flush=True)
             return _fallback_enhance(input_path, output_path, ss, t, mode)
 
         overlay_vf = (
@@ -547,7 +551,7 @@ def enhance_video(input_path: str, output_path: str, mode: str = "normal") -> bo
         return os.path.exists(output_path) and os.path.getsize(output_path) > 10000
     except Exception as e:
         print(f"FFmpeg Exception: {e}", flush=True)
-        return False
+        return _fallback_enhance(input_path, output_path, 0.0, max(duration, 1.0), mode)
     finally:
         for p in [texture_path, temp_path]:
             if p and os.path.exists(p):
@@ -558,21 +562,21 @@ def enhance_video(input_path: str, output_path: str, mode: str = "normal") -> bo
 
 def _fallback_enhance(input_path: str, output_path: str, ss: float, t: float, mode: str = "normal") -> bool:
     if mode == "mirror_yellow":
-        warm = "colorbalance=rs=0.22:gs=0.11:bs=-0.04,"
-        border = 8
+        warm = "colorbalance=rs=0.20:gs=0.09:bs=-0.03,"
+        border = 7
         pad = f"pad=iw+{border*2}:ih+{border*2}:{border}:{border}:color=0xC0C0C0,"
     else:
-        warm = "colorbalance=rs=0.05:gs=0.02:bs=-0.02,"
+        warm = "colorbalance=rs=0.04:gs=0.02:bs=-0.02,"
         pad = ""
 
     vf = (
         f"trim=start={ss}:duration={t},"
         "setpts=PTS-STARTPTS,"
         "scale=trunc(iw/2)*2:trunc(ih/2)*2,"
-        "eq=contrast=1.025:brightness=0.006:saturation=1.02,"
+        "eq=contrast=1.02:brightness=0.005:saturation=1.015,"
         f"{warm}"
         f"{pad}"
-        "noise=alls=4:allf=t,"
+        "noise=alls=3:allf=t,"
         "format=yuv420p"
     )
     cmd = [
@@ -583,16 +587,19 @@ def _fallback_enhance(input_path: str, output_path: str, ss: float, t: float, mo
         "-map", "0:a:0?",
         "-c:v", "libx264",
         "-preset", "veryfast",
-        "-crf", "18",
+        "-crf", "19",
         "-c:a", "aac",
-        "-b:a", "192k",
+        "-b:a", "160k",
+        "-ar", "44100",
+        "-ac", "2",
         "-movflags", "+faststart",
         "-pix_fmt", "yuv420p",
         "-vf", vf,
+        "-max_muxing_queue_size", "9999",
         output_path
     ]
     try:
-        r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=600, text=True)
+        r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=480, text=True)
         return r.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 10000
     except Exception:
         return False
@@ -654,7 +661,6 @@ async def safe_send_video(message, path: str, caption: str, unique_id: str, also
                     read_timeout=120, write_timeout=120, connect_timeout=60,
                 )
         
-        # Auto post to channel ONLY if admin
         if also_to_channel and context:
             try:
                 with open(path, "rb") as vid2:
@@ -856,7 +862,7 @@ def get_user_keyboard(username: str = None):
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 # ------------------------------------------------------
-# Commands (long versions with custom emoji)
+# Commands (FULL LONG VERSION with custom emoji)
 # ------------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text_parts = []
@@ -1082,7 +1088,6 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 increment_usage(user_id)
 
-                # Auto post to channel ONLY if admin
                 if is_admin:
                     try:
                         output.seek(0)
@@ -1094,7 +1099,6 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     except Exception as e:
                         print(f"Channel image post failed: {e}", flush=True)
 
-                # Auto delete original message if admin
                 if is_admin:
                     try:
                         await message.delete()
@@ -1212,7 +1216,6 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     caption = "✅ Yellow Mode + Silver Border applied"
 
                 if success and os.path.exists(output_path):
-                    # only send to channel if admin
                     ok = await safe_send_video(
                         message, output_path, caption, unique_id, 
                         also_to_channel=is_admin, 
@@ -1221,7 +1224,6 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if ok:
                         increment_usage(user_id)
 
-                        # Auto delete original message if admin
                         if is_admin:
                             try:
                                 await message.delete()
