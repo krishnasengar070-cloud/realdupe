@@ -1582,23 +1582,23 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Yellow Mode toggle
+    # Yellow Mode toggle (English only)
     if text == "Yellow Mode":
         current = get_user_mode(user_id)
         if current == "mirror_yellow":
             set_user_mode(user_id, "normal")
             await message.reply_text(
                 "Yellow Mode OFF.\n"
-                "Ab normal processing hoga (no yellow, no silver border)."
+                "Videos and images will now use normal processing (no yellow filter, no silver border)."
             )
         else:
             set_user_mode(user_id, "mirror_yellow")
             await message.reply_text(
                 "Yellow Mode ON ✅\n\n"
-                "Ab se:\n"
-                "• Videos → Strong Yellow + Silver Border + saari purani features\n"
-                "• Images → Sirf Silver Border + purani features\n\n"
-                "Phir se press karke OFF kar sakte ho."
+                "From now on:\n"
+                "• Videos → Strong Yellow filter + Silver Border + all existing features\n"
+                "• Images → Silver Border + all existing features\n\n"
+                "Press Yellow Mode again to turn it off."
             )
         return
 
