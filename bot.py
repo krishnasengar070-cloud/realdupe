@@ -43,7 +43,6 @@ DATA_DIR = os.getenv("DATA_DIR", ".")
 DB_FILE = os.path.join(DATA_DIR, "bot_data.db")
 LIFETIME_FREE_FILE = os.path.join(DATA_DIR, "lifetime_free.json")
 
-# Channel where bot auto-processes everything and deletes the original after output
 CHANNEL_ID = -1004344831643
 
 HARDCODED_LIFETIME_FREE = [
@@ -61,7 +60,6 @@ def get_user_lock(user_id: int) -> asyncio.Lock:
 
 
 def is_allowed_chat(message, bot_username: str = None) -> bool:
-    """Allow private chats, the configured channel, and groups only when mentioned/replied."""
     if not message or not getattr(message, "chat", None):
         return False
     if message.chat.id == CHANNEL_ID:
@@ -76,7 +74,7 @@ def is_allowed_chat(message, bot_username: str = None) -> bool:
                 message.reply_to_message.from_user.username.lower() == bot_username):
                 is_reply = True
         return mentioned or is_reply
-    return True  # private chat
+    return True
 
 
 # ------------------------------------------------------
@@ -144,6 +142,12 @@ def init_db():
         CREATE TABLE IF NOT EXISTS paid_users (
             user_id INTEGER PRIMARY KEY,
             expiry TEXT
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS user_prefs (
+            user_id INTEGER PRIMARY KEY,
+            mode TEXT DEFAULT 'normal'
         )
     """)
     c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('global_free', '0')")
@@ -279,6 +283,22 @@ def can_use_bot(user_id: int, username: str = None) -> tuple[bool, str]:
         "👉 /buy"
     )
 
+# ---------- Yellow Mode preference ----------
+def get_user_mode(user_id: int) -> str:
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT mode FROM user_prefs WHERE user_id = ?", (user_id,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else "normal"
+
+def set_user_mode(user_id: int, mode: str):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO user_prefs (user_id, mode) VALUES (?, ?)", (user_id, mode))
+    conn.commit()
+    conn.close()
+
 # ------------------------------------------------------
 # Flask keep-alive
 # ------------------------------------------------------
@@ -363,7 +383,6 @@ def enhance_image(image: Image.Image) -> Image.Image:
     image = ImageEnhance.Contrast(image).enhance(random.uniform(1.03, 1.10))
     image = ImageEnhance.Color(image).enhance(random.uniform(0.97, 1.05))
 
-    # warm tone
     r, g, b = image.split()
     r = ImageEnhance.Brightness(r).enhance(random.uniform(1.02, 1.06))
     g = ImageEnhance.Brightness(g).enhance(random.uniform(1.01, 1.03))
@@ -379,9 +398,9 @@ def enhance_image(image: Image.Image) -> Image.Image:
     return Image.open(out).convert("RGB")
 
 # ------------------------------------------------------
-# Video enhance — warm + overlay + crop + speed + fps
+# Video enhance (supports normal + mirror_yellow)
 # ------------------------------------------------------
-def enhance_video(input_path: str, output_path: str) -> bool:
+def enhance_video(input_path: str, output_path: str, mode: str = "normal") -> bool:
     if not shutil.which("ffmpeg"):
         print("CRITICAL: ffmpeg binary not found in system PATH.", flush=True)
         return False
@@ -438,18 +457,26 @@ def enhance_video(input_path: str, output_path: str) -> bool:
         saturation = random.uniform(0.99, 1.04)
         noise_str = random.randint(3, 7)
         overlay_opacity = random.uniform(0.04, 0.085)
-        warm_rs = random.uniform(0.03, 0.08)
-        warm_gs = random.uniform(0.01, 0.04)
+
+        if mode == "mirror_yellow":
+            warm_rs = random.uniform(0.12, 0.22)
+            warm_gs = random.uniform(0.04, 0.10)
+            hflip_part = "hflip,"
+        else:
+            warm_rs = random.uniform(0.03, 0.08)
+            warm_gs = random.uniform(0.01, 0.04)
+            hflip_part = ""
 
         vf = (
             f"trim=start={ss}:duration={t},"
             f"setpts=PTS-STARTPTS,"
+            f"{hflip_part}"
             f"crop=iw*(1-{crop_pct}):ih*(1-{crop_pct}),"
             f"scale=trunc(iw/2)*2:trunc(ih/2)*2,"
             f"setpts={setpts}*PTS,"
             f"fps={target_fps},"
             f"eq=contrast={contrast}:brightness={brightness}:saturation={saturation},"
-            f"colorbalance=rs={warm_rs}:gs={warm_gs}:bs=-0.02,"
+            f"colorbalance=rs={warm_rs}:gs={warm_gs}:bs=-0.03,"
             f"unsharp=3:3:0.4:2:2:0.2,"
             f"noise=alls={noise_str}:allf=t,"
             f"format=yuv420p"
@@ -477,7 +504,7 @@ def enhance_video(input_path: str, output_path: str) -> bool:
         if result1.returncode != 0 or not os.path.exists(temp_path):
             print("===== FFMPEG ERROR (main) =====", flush=True)
             print(result1.stderr[-2500:] if result1.stderr else "No stderr", flush=True)
-            return _fallback_enhance(input_path, output_path, ss, t)
+            return _fallback_enhance(input_path, output_path, ss, t, mode)
 
         overlay_vf = (
             f"[1:v]scale={width}:{height},format=rgba,colorchannelmixer=aa={overlay_opacity}[tex];"
@@ -515,13 +542,16 @@ def enhance_video(input_path: str, output_path: str) -> bool:
                 except Exception:
                     pass
 
-def _fallback_enhance(input_path: str, output_path: str, ss: float, t: float) -> bool:
+def _fallback_enhance(input_path: str, output_path: str, ss: float, t: float, mode: str = "normal") -> bool:
+    hflip = "hflip," if mode == "mirror_yellow" else ""
+    warm = "colorbalance=rs=0.18:gs=0.07:bs=-0.03," if mode == "mirror_yellow" else "colorbalance=rs=0.05:gs=0.02:bs=-0.02,"
     vf = (
         f"trim=start={ss}:duration={t},"
         "setpts=PTS-STARTPTS,"
+        f"{hflip}"
         "scale=trunc(iw/2)*2:trunc(ih/2)*2,"
         "eq=contrast=1.025:brightness=0.006:saturation=1.02,"
-        "colorbalance=rs=0.05:gs=0.02:bs=-0.02,"
+        f"{warm}"
         "noise=alls=4:allf=t,"
         "format=yuv420p"
     )
@@ -721,8 +751,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text += f"FFmpeg Installed: {'YES ✅' if shutil.which('ffmpeg') else 'NO ❌'}\n"
     text += f"Global Free Mode: {'ON ✅' if global_free else 'OFF (Daily limit active)'}\n"
     text += f"Daily Free Limit: {DAILY_FREE_LIMIT} (image + video + link)\n"
-    text += f"Data Dir: {DATA_DIR}\n"
-    text += f"Channel ID: {CHANNEL_ID}\n\n"
+    text += f"Data Dir: {DATA_DIR}\n\n"
     text += f"Lifetime Free Users ({len(free_list)}):\n"
     if free_list:
         for uid in free_list:
@@ -741,7 +770,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text)
 
 # ------------------------------------------------------
-# Buy — CRYPTO ONLY (Stars completely removed)
+# Buy — CRYPTO ONLY
 # ------------------------------------------------------
 async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -763,6 +792,7 @@ def get_user_keyboard(username: str = None):
     keyboard = [
         [KeyboardButton("How to use"), KeyboardButton("About")],
         [KeyboardButton("Buy"), KeyboardButton("Help")],
+        [KeyboardButton("Yellow Mode")],
     ]
     if username and username.lower() == ADMIN_USERNAME.lower():
         keyboard.append([KeyboardButton("Status"), KeyboardButton("Free All")])
@@ -771,7 +801,7 @@ def get_user_keyboard(username: str = None):
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 # ------------------------------------------------------
-# Commands (LONG versions restored)
+# Commands
 # ------------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text_parts = []
@@ -806,8 +836,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     add_custom("6203873525116183636")
     add_text(" Twitter/X link and I will download it in original quality.\n\n")
     add_text("🚨 Note: No tool can completely remove AI signatures from every file. Results vary by platform and content, but this bot works well on many images & videos.\n\n")
-    add_text("In groups: mention me with the photo, video or link.\n")
-    add_text("In the configured channel: just post — bot processes + deletes original.\n\n")
+    add_text("New: Press Yellow Mode to enable mirror + strong yellowish filter on videos.\n\n")
+    add_text("In groups: mention me with the photo, video or link.\n\n")
     add_text("Free users get 5 actions per day.\n")
     add_text("Unlimited → /buy (crypto only)\n\n")
     add_text("For any help contact @pvnuo ")
@@ -854,8 +884,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     add_text(" TikTok / ")
     add_custom("6203873525116183636")
     add_text(" Twitter/X link → download media in original quality\n\n")
-    add_text("In groups: mention me with the photo, video or link.\n")
-    add_text("In the channel: post anything — bot processes and deletes the original.\n\n")
+    add_text("Yellow Mode: Press the button to enable mirror + strong yellowish filter on videos.\n\n")
+    add_text("In groups: mention me with the photo, video or link.\n\n")
     add_text("Free users get 5 actions per day (image + video + link).\n")
     add_text("For any help contact @pvnuo")
 
@@ -894,8 +924,8 @@ async def about(update: Update, context: ContextTypes.DEFAULT_TYPE):
     add_text(" TikTok or ")
     add_custom("6203873525116183636")
     add_text(" Twitter/X link and I will download the media in original quality.\n\n")
-    add_text("In groups: mention me with the photo, video or link.\n")
-    add_text("In the configured channel: post → process → original deleted.\n\n")
+    add_text("Yellow Mode available for stronger mirror + yellowish look.\n\n")
+    add_text("In groups: mention me with the photo, video or link.\n\n")
     add_text("For any help contact @pvnuo ")
     add_custom("6201528571756815592")
 
@@ -926,9 +956,9 @@ async def how(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     add_text("How it works:\n\n")
     add_text("1. Send a photo or video directly → bot cleans metadata + applies unique fingerprint (crop + texture overlay + speed + warm tone + fps) so platforms see it as original.\n")
-    add_text("2. Send Instagram / TikTok / Twitter-X link → bot downloads original quality media.\n")
-    add_text("3. In groups you must mention the bot or reply to its message.\n")
-    add_text("4. In the configured channel just post — bot processes and deletes the original message.\n\n")
+    add_text("2. Press Yellow Mode → videos will also be mirrored + stronger yellowish filter.\n")
+    add_text("3. Send Instagram / TikTok / Twitter-X link → bot downloads original quality media.\n")
+    add_text("4. In groups you must mention the bot or reply to its message.\n\n")
     add_text("Free users get 5 actions/day. Unlimited plans available via /buy (crypto only).\n\n")
     add_text("For any help contact @pvnuo")
 
@@ -936,107 +966,70 @@ async def how(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, entities=entities, reply_markup=get_user_keyboard(update.effective_user.username if update.effective_user else None))
 
 # ------------------------------------------------------
-# Image handler — STRICT LIMIT + LOCK + CHANNEL
-# ------------------------------------------------------
-
-async def send_to_channel_photo(context, image_bytes_io, caption: str):
-    try:
-        image_bytes_io.seek(0)
-        await context.bot.send_photo(
-            chat_id=CHANNEL_ID,
-            photo=image_bytes_io,
-            caption=caption,
-            read_timeout=120, write_timeout=120, connect_timeout=60,
-        )
-        return True
-    except Exception as e:
-        print(f"send_to_channel_photo failed: {e}", flush=True)
-        return False
-
-
-async def send_to_channel_video(context, path: str, caption: str, unique_id: str):
-    path = compress_video_if_needed(path, unique_id, max_mb=45.0)
-    if not os.path.exists(path):
-        return False
-    size = os.path.getsize(path)
-    force_doc = size > 40 * 1024 * 1024
-    try:
-        with open(path, "rb") as vid:
-            if force_doc:
-                await context.bot.send_document(
-                    chat_id=CHANNEL_ID,
-                    document=vid,
-                    caption=caption + " (sent as file)",
-                    filename=os.path.basename(path) or "video.mp4",
-                    read_timeout=120, write_timeout=120, connect_timeout=60,
-                )
-            else:
-                await context.bot.send_video(
-                    chat_id=CHANNEL_ID,
-                    video=vid,
-                    caption=caption,
-                    supports_streaming=True,
-                    read_timeout=120, write_timeout=120, connect_timeout=60,
-                )
-        return True
-    except Exception as e:
-        print(f"send_to_channel_video failed: {e}", flush=True)
-        try:
-            path2 = compress_video_if_needed(path, unique_id + "_r", max_mb=38.0)
-            with open(path2, "rb") as vid:
-                await context.bot.send_document(
-                    chat_id=CHANNEL_ID,
-                    document=vid,
-                    caption=caption + " (sent as file)",
-                    filename=os.path.basename(path2) or "video.mp4",
-                    read_timeout=120, write_timeout=120, connect_timeout=60,
-                )
-            return True
-        except Exception as e2:
-            print(f"channel document fallback failed: {e2}", flush=True)
-            return False
-
-
-# ------------------------------------------------------
-# Image handler — DM process → post to channel → delete original
+# Image handler
 # ------------------------------------------------------
 async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message or update.channel_post or update.message
     if not message:
         return
 
-    # only work in private chat for this flow
-    if message.chat.type != "private":
-        # still allow old group/channel behaviour lightly
-        pass
-
     user = update.effective_user
     user_id = user.id if user else 0
     username = user.username if user else None
+    is_channel = message.chat and message.chat.id == CHANNEL_ID
 
-    print(f"[IMG] chat={message.chat.id if message.chat else None} user={user_id}", flush=True)
+    if not is_channel:
+        lock = get_user_lock(user_id)
+        async with lock:
+            left = remaining_quota(user_id, username)
+            if left <= 0:
+                await message.reply_text(
+                    "You have used all 5 free actions for today.\n"
+                    "Please try again tomorrow or contact @pvnuo for unlimited access.\n\n"
+                    "👉 /buy"
+                )
+                return
 
-    left = remaining_quota(user_id, username)
-    if left <= 0:
-        await message.reply_text(
-            "You have used all 5 free actions for today.\n"
-            "Please try again tomorrow or contact @pvnuo for unlimited access.\n\n"
-            "👉 /buy"
-        )
-        return
+            bot_username = (await context.bot.get_me()).username.lower()
+            if not is_allowed_chat(message, bot_username):
+                return
 
-    bot_username = (await context.bot.get_me()).username.lower()
-    if not is_allowed_chat(message, bot_username):
-        return
-
-    lock = get_user_lock(user_id)
-    async with lock:
-        status_msg = None
-        try:
             status_msg = await message.reply_text("⌛")
-        except Exception as e:
-            print(f"[IMG] status failed: {e}", flush=True)
+            start_time = time.time()
+            try:
+                if message.photo:
+                    file = await context.bot.get_file(message.photo[-1].file_id)
+                elif message.document and message.document.mime_type and "image" in message.document.mime_type:
+                    file = await context.bot.get_file(message.document.file_id)
+                else:
+                    await status_msg.delete()
+                    return
 
+                image_bytes = await file.download_as_bytearray()
+                image = Image.open(io.BytesIO(image_bytes))
+                result = enhance_image(image)
+                output = io.BytesIO()
+                quality = random.randint(93, 97)
+                result.save(output, format="JPEG", quality=quality, optimize=True, progressive=True, subsampling=0)
+                output.seek(0)
+                elapsed = round(time.time() - start_time, 2)
+                await message.reply_photo(
+                    photo=output,
+                    caption=f"✅ Unique version ready\n⏱ {elapsed}s | Quality: {quality}",
+                )
+                increment_usage(user_id)
+                try:
+                    await status_msg.delete()
+                except Exception:
+                    pass
+            except Exception as e:
+                print(f"Image error: {e}", flush=True)
+                try:
+                    await status_msg.edit_text("❌ Failed to process the image.")
+                except Exception:
+                    await message.reply_text("❌ Failed to process the image.")
+    else:
+        status_msg = await message.reply_text("⌛")
         start_time = time.time()
         try:
             if message.photo:
@@ -1044,11 +1037,7 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif message.document and message.document.mime_type and "image" in message.document.mime_type:
                 file = await context.bot.get_file(message.document.file_id)
             else:
-                if status_msg:
-                    try:
-                        await status_msg.delete()
-                    except Exception:
-                        pass
+                await status_msg.delete()
                 return
 
             image_bytes = await file.download_as_bytearray()
@@ -1059,53 +1048,24 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
             result.save(output, format="JPEG", quality=quality, optimize=True, progressive=True, subsampling=0)
             output.seek(0)
             elapsed = round(time.time() - start_time, 2)
-            caption = f"✅ Unique version ready\n⏱ {elapsed}s | Quality: {quality}"
-
-            is_admin = bool(username and username.lower() == ADMIN_USERNAME.lower())
-
-            # always reply in DM
-            output.seek(0)
+            await message.reply_photo(
+                photo=output,
+                caption=f"✅ Unique version ready\n⏱ {elapsed}s | Quality: {quality}",
+            )
             try:
-                await message.reply_photo(photo=output, caption=caption)
-            except Exception as e:
-                print(f"[IMG] dm reply failed: {e}", flush=True)
-
-            # only admin: also post to channel + delete original in DM
-            if is_admin:
-                output.seek(0)
-                ok = await send_to_channel_photo(context, output, caption)
-                if not ok:
-                    print("[IMG] channel post failed for admin", flush=True)
-                if status_msg:
-                    try:
-                        await status_msg.delete()
-                    except Exception:
-                        pass
-                try:
-                    await message.delete()
-                except Exception as e:
-                    print(f"[IMG] delete original failed: {e}", flush=True)
-            else:
-                if status_msg:
-                    try:
-                        await status_msg.delete()
-                    except Exception:
-                        pass
-
-            increment_usage(user_id)
+                await status_msg.delete()
+                await message.delete()
+            except Exception:
+                pass
         except Exception as e:
-            print(f"Image error: {e}", flush=True)
+            print(f"Channel image error: {e}", flush=True)
             try:
-                if status_msg:
-                    await status_msg.edit_text("❌ Failed to process the image.")
-                else:
-                    await message.reply_text("❌ Failed to process the image.")
+                await status_msg.edit_text("❌ Failed.")
             except Exception:
                 pass
 
-
 # ------------------------------------------------------
-# Video handler — DM process → post to channel → delete original
+# Video handler
 # ------------------------------------------------------
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message or update.channel_post or update.message
@@ -1115,111 +1075,123 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = user.id if user else 0
     username = user.username if user else None
+    is_channel = message.chat and message.chat.id == CHANNEL_ID
 
-    print(f"[VID] chat={message.chat.id if message.chat else None} user={user_id}", flush=True)
+    mode = get_user_mode(user_id) if not is_channel else "normal"
 
-    left = remaining_quota(user_id, username)
-    if left <= 0:
-        await message.reply_text(
-            "You have used all 5 free actions for today.\n"
-            "Please try again tomorrow or contact @pvnuo for unlimited access.\n\n"
-            "👉 /buy"
-        )
-        return
+    if not is_channel:
+        lock = get_user_lock(user_id)
+        async with lock:
+            left = remaining_quota(user_id, username)
+            if left <= 0:
+                await message.reply_text(
+                    "You have used all 5 free actions for today.\n"
+                    "Please try again tomorrow or contact @pvnuo for unlimited access.\n\n"
+                    "👉 /buy"
+                )
+                return
 
-    bot_username = (await context.bot.get_me()).username.lower()
-    if not is_allowed_chat(message, bot_username):
-        return
+            bot_username = (await context.bot.get_me()).username.lower()
+            if not is_allowed_chat(message, bot_username):
+                return
 
-    lock = get_user_lock(user_id)
-    async with lock:
-        status_msg = None
-        try:
             status_msg = await message.reply_text("⌛")
-        except Exception as e:
-            print(f"[VID] status failed: {e}", flush=True)
 
-        if not shutil.which("ffmpeg"):
-            if status_msg:
+            if not shutil.which("ffmpeg"):
+                await status_msg.edit_text("❌ Server error: FFmpeg not installed.")
+                return
+
+            target_obj = message.video or (message.document if message.document and "video" in (message.document.mime_type or "") else None)
+            if not target_obj:
+                await status_msg.edit_text("❌ Unsupported video format.")
+                return
+
+            if target_obj.file_size and target_obj.file_size > 20 * 1024 * 1024:
+                size_mb = round(target_obj.file_size / (1024 * 1024), 1)
+                await status_msg.edit_text(
+                    f"❌ File too large ({size_mb} MB).\n"
+                    f"Telegram Bot API limits bot downloads to 20 MB max.\n"
+                    f"Please compress or trim the video before sending."
+                )
+                return
+
+            unique_id = str(int(time.time() * 1000))
+            input_path = f"input_{unique_id}.mp4"
+            output_path = f"output_{unique_id}.mp4"
+            try:
+                file = await context.bot.get_file(target_obj.file_id)
+                await file.download_to_drive(input_path)
+                success = enhance_video(input_path, output_path, mode=mode)
+
+                caption = "✅ Here’s your modified video"
+                if mode == "mirror_yellow":
+                    caption = "✅ Mirror + Yellow Mode applied"
+
+                if success and os.path.exists(output_path):
+                    ok = await safe_send_video(message, output_path, caption, unique_id)
+                    if ok:
+                        increment_usage(user_id)
+                        try:
+                            await status_msg.delete()
+                        except Exception:
+                            pass
+                    else:
+                        await status_msg.edit_text("❌ Failed to send the video.")
+                else:
+                    await status_msg.edit_text("❌ Failed to process the video.")
+            except Exception as e:
+                print(f"Video error: {e}", flush=True)
                 try:
-                    await status_msg.edit_text("❌ Server error: FFmpeg not installed.")
+                    await status_msg.edit_text("❌ Failed to process the video.")
                 except Exception:
                     pass
+            finally:
+                for p in [input_path, output_path]:
+                    if os.path.exists(p):
+                        try:
+                            os.remove(p)
+                        except Exception:
+                            pass
+                for f in os.listdir("."):
+                    if f.startswith(f"comp_{unique_id}") or f.startswith(f"texture_{unique_id}") or f.startswith(f"temp_vid_{unique_id}"):
+                        try:
+                            os.remove(f)
+                        except Exception:
+                            pass
+    else:
+        status_msg = await message.reply_text("⌛")
+        if not shutil.which("ffmpeg"):
+            await status_msg.edit_text("❌ FFmpeg missing.")
             return
-
         target_obj = message.video or (message.document if message.document and "video" in (message.document.mime_type or "") else None)
         if not target_obj:
-            if status_msg:
-                try:
-                    await status_msg.edit_text("❌ Unsupported video format.")
-                except Exception:
-                    pass
+            await status_msg.edit_text("❌ Unsupported.")
             return
-
-        if target_obj.file_size and target_obj.file_size > 20 * 1024 * 1024:
-            size_mb = round(target_obj.file_size / (1024 * 1024), 1)
-            if status_msg:
-                try:
-                    await status_msg.edit_text(
-                        f"❌ File too large ({size_mb} MB).\n"
-                        f"Telegram Bot API limits bot downloads to 20 MB max.\n"
-                        f"Please compress or trim the video before sending."
-                    )
-                except Exception:
-                    pass
-            return
-
         unique_id = str(int(time.time() * 1000))
         input_path = f"input_{unique_id}.mp4"
         output_path = f"output_{unique_id}.mp4"
         try:
             file = await context.bot.get_file(target_obj.file_id)
             await file.download_to_drive(input_path)
-            success = enhance_video(input_path, output_path)
-
+            success = enhance_video(input_path, output_path, mode="normal")
             if success and os.path.exists(output_path):
-                caption = "✅ Here’s your modified video"
-                is_admin = bool(username and username.lower() == ADMIN_USERNAME.lower())
-
-                # always send back in DM
-                ok_dm = await safe_send_video(message, output_path, caption, unique_id)
-
-                # only admin: post to channel + delete original
-                if is_admin:
-                    ok_channel = await send_to_channel_video(context, output_path, caption, unique_id)
-                    if not ok_channel:
-                        print("[VID] channel post failed for admin", flush=True)
-                    if status_msg:
-                        try:
-                            await status_msg.delete()
-                        except Exception:
-                            pass
+                ok = await safe_send_video(message, output_path, "✅ Here’s your modified video", unique_id)
+                if ok:
                     try:
+                        await status_msg.delete()
                         await message.delete()
-                    except Exception as e:
-                        print(f"[VID] delete original failed: {e}", flush=True)
-                else:
-                    if status_msg:
-                        try:
-                            await status_msg.delete()
-                        except Exception:
-                            pass
-
-                if ok_dm or is_admin:
-                    increment_usage(user_id)
-            else:
-                if status_msg:
-                    try:
-                        await status_msg.edit_text("❌ Failed to process the video.")
                     except Exception:
                         pass
+                else:
+                    await status_msg.edit_text("❌ Failed to send.")
+            else:
+                await status_msg.edit_text("❌ Failed.")
         except Exception as e:
-            print(f"Video error: {e}", flush=True)
-            if status_msg:
-                try:
-                    await status_msg.edit_text("❌ Failed to process the video.")
-                except Exception:
-                    pass
+            print(f"Channel video error: {e}", flush=True)
+            try:
+                await status_msg.edit_text("❌ Failed.")
+            except Exception:
+                pass
         finally:
             for p in [input_path, output_path]:
                 if os.path.exists(p):
@@ -1227,14 +1199,10 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         os.remove(p)
                     except Exception:
                         pass
-            for f in os.listdir("."):
-                if f.startswith(f"comp_{unique_id}") or f.startswith(f"texture_{unique_id}") or f.startswith(f"temp_vid_{unique_id}"):
-                    try:
-                        os.remove(f)
-                    except Exception:
-                        pass
 
-
+# ------------------------------------------------------
+# Instagram Download
+# ------------------------------------------------------
 def download_instagram(url: str, unique_id: str):
     L = instaloader.Instaloader(
         download_videos=True,
@@ -1273,6 +1241,9 @@ def download_instagram(url: str, unique_id: str):
         print(f"Download post error: {e}", flush=True)
     return paths
 
+# ------------------------------------------------------
+# TikTok Download (FULL)
+# ------------------------------------------------------
 async def download_tiktok(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str, is_channel: bool = False):
     text_parts = []
     entities = []
@@ -1403,6 +1374,9 @@ async def download_tiktok(update: Update, context: ContextTypes.DEFAULT_TYPE, ur
             except Exception:
                 pass
 
+# ------------------------------------------------------
+# Twitter / X Download (FULL)
+# ------------------------------------------------------
 async def download_twitter(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str, is_channel: bool = False):
     text_parts = []
     entities = []
@@ -1550,8 +1524,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username = user.username if user else None
     is_channel = message.chat and message.chat.id == CHANNEL_ID
 
-    print(f"[TXT] chat={message.chat.id if message.chat else None} is_channel={is_channel} text={text[:60]}", flush=True)
-
     if text == "How to use":
         await how(update, context)
         return
@@ -1589,12 +1561,31 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # Yellow Mode toggle
+    if text == "Yellow Mode":
+        current = get_user_mode(user_id)
+        if current == "mirror_yellow":
+            set_user_mode(user_id, "normal")
+            await message.reply_text(
+                "Yellow Mode OFF.\n"
+                "Videos will now use normal processing."
+            )
+        else:
+            set_user_mode(user_id, "mirror_yellow")
+            await message.reply_text(
+                "Yellow Mode ON.\n"
+                "All videos you send from now will be mirrored + yellowish.\n"
+                "Press Yellow Mode again to turn it off."
+            )
+        return
+
     if not text.startswith("http"):
         await message.reply_text(
             "About this Bot:\n\n"
             "• Just send me any image or video and I will give you a cleaned unique version.\n"
             "• The changes help reduce AI labels and unoriginal content strikes while keeping high visual quality.\n"
             "• You can also send any Instagram, TikTok or Twitter/X link and I will download the media for you in original quality.\n\n"
+            "Yellow Mode: Press the button to enable mirror + strong yellowish filter.\n\n"
             "In groups: You must mention me with the photo, video or link.\n"
             "In the channel: just post — bot processes and deletes the original.\n\n"
             "For any help contact @pvnuo",
@@ -1765,17 +1756,14 @@ def main():
     app.add_handler(CommandHandler("removefree", removefree))
     app.add_handler(CommandHandler("status", status))
 
-    # normal chats + groups
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_image))
     app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    # also catch by chat id (covers some channel edge cases)
     app.add_handler(MessageHandler(filters.Chat(CHANNEL_ID) & (filters.PHOTO | filters.Document.IMAGE), handle_image))
     app.add_handler(MessageHandler(filters.Chat(CHANNEL_ID) & (filters.VIDEO | filters.Document.VIDEO), handle_video))
     app.add_handler(MessageHandler(filters.Chat(CHANNEL_ID) & filters.TEXT & ~filters.COMMAND, handle_text))
 
-    # channel_post handlers
     try:
         app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST & (filters.PHOTO | filters.Document.IMAGE), handle_image))
         app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST & (filters.VIDEO | filters.Document.VIDEO), handle_video))
@@ -1784,14 +1772,11 @@ def main():
     except Exception as e:
         print(f"UpdateType.CHANNEL_POST not available: {e}", flush=True)
 
-    # bulletproof fallback: catch ANY update that is a channel_post
     async def channel_post_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         post = update.channel_post
         if not post:
             return
-        print(f"[ROUTER] channel_post from chat={post.chat.id}", flush=True)
         if post.chat.id != CHANNEL_ID:
-            print(f"[ROUTER] ignored (wanted {CHANNEL_ID})", flush=True)
             return
         if post.photo or (post.document and post.document.mime_type and "image" in (post.document.mime_type or "")):
             await handle_image(update, context)
@@ -1802,7 +1787,6 @@ def main():
 
     app.add_handler(TypeHandler(Update, channel_post_router), group=1)
 
-    # shows EVERY update the bot receives
     async def raw_update_logger(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kind = "channel_post" if update.channel_post else (
             "message" if update.message else (
