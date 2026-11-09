@@ -27,7 +27,7 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
-from PIL import Image, ImageEnhance, ImageFilter
+from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 import yt_dlp
 import instaloader
 
@@ -46,8 +46,9 @@ LIFETIME_FREE_FILE = os.path.join(DATA_DIR, "lifetime_free.json")
 CHANNEL_ID = -1004344831643
 
 HARDCODED_LIFETIME_FREE = [
-    # example:
-    # 123456789,
+    6758059603,
+    5375098801,
+    6239058533,
 ]
 # ====================================================
 
@@ -102,6 +103,9 @@ def save_lifetime_free_json(user_ids: list):
 
 def sync_lifetime_free_from_json():
     ids = load_lifetime_free_json()
+    for uid in HARDCODED_LIFETIME_FREE:
+        if uid not in ids:
+            ids.append(uid)
     if not ids:
         return
     conn = sqlite3.connect(DB_FILE)
@@ -110,7 +114,8 @@ def sync_lifetime_free_from_json():
         c.execute("INSERT OR IGNORE INTO lifetime_free (user_id) VALUES (?)", (uid,))
     conn.commit()
     conn.close()
-    print(f"Restored {len(ids)} lifetime free users from JSON", flush=True)
+    save_lifetime_free_json(ids)
+    print(f"Restored {len(ids)} lifetime free users from JSON + Hardcoded", flush=True)
 
 # ------------------------------------------------------
 # Database
@@ -339,9 +344,9 @@ def create_noise_texture(width: int, height: int, unique_id: str) -> str:
     return path
 
 # ------------------------------------------------------
-# Image enhance
+# Image enhance (Silver Border only when Yellow Mode ON)
 # ------------------------------------------------------
-def enhance_image(image: Image.Image) -> Image.Image:
+def enhance_image(image: Image.Image, mode: str = "normal") -> Image.Image:
     if image.mode != "RGB":
         image = image.convert("RGB")
 
@@ -392,13 +397,19 @@ def enhance_image(image: Image.Image) -> Image.Image:
     texture = ImageEnhance.Brightness(texture).enhance(random.uniform(0.4, 0.7))
     image = Image.blend(image, texture, random.uniform(0.025, 0.055))
 
+    # ===== Silver Border ONLY when Yellow Mode is ON =====
+    if mode == "mirror_yellow":
+        border_size = random.randint(5, 9)
+        silver = (192, 192, 192)
+        image = ImageOps.expand(image, border=border_size, fill=silver)
+
     out = io.BytesIO()
     image.save(out, format="JPEG", quality=random.randint(93, 97), optimize=True, progressive=True, subsampling=0)
     out.seek(0)
     return Image.open(out).convert("RGB")
 
 # ------------------------------------------------------
-# Video enhance (supports normal + mirror_yellow)
+# Video enhance (Yellow + Silver Border when mode ON, NO mirror)
 # ------------------------------------------------------
 def enhance_video(input_path: str, output_path: str, mode: str = "normal") -> bool:
     if not shutil.which("ffmpeg"):
@@ -458,27 +469,29 @@ def enhance_video(input_path: str, output_path: str, mode: str = "normal") -> bo
         noise_str = random.randint(3, 7)
         overlay_opacity = random.uniform(0.04, 0.085)
 
+        # Stronger yellow + silver border only when mode ON
         if mode == "mirror_yellow":
-            warm_rs = random.uniform(0.12, 0.22)
-            warm_gs = random.uniform(0.04, 0.10)
-            hflip_part = "hflip,"
+            warm_rs = random.uniform(0.18, 0.28)
+            warm_gs = random.uniform(0.08, 0.15)
+            border = random.randint(6, 10)
+            pad_part = f"pad=iw+{border*2}:ih+{border*2}:{border}:{border}:color=0xC0C0C0,"
         else:
             warm_rs = random.uniform(0.03, 0.08)
             warm_gs = random.uniform(0.01, 0.04)
-            hflip_part = ""
+            pad_part = ""
 
         vf = (
             f"trim=start={ss}:duration={t},"
             f"setpts=PTS-STARTPTS,"
-            f"{hflip_part}"
             f"crop=iw*(1-{crop_pct}):ih*(1-{crop_pct}),"
             f"scale=trunc(iw/2)*2:trunc(ih/2)*2,"
             f"setpts={setpts}*PTS,"
             f"fps={target_fps},"
             f"eq=contrast={contrast}:brightness={brightness}:saturation={saturation},"
-            f"colorbalance=rs={warm_rs}:gs={warm_gs}:bs=-0.03,"
+            f"colorbalance=rs={warm_rs}:gs={warm_gs}:bs=-0.04,"
             f"unsharp=3:3:0.4:2:2:0.2,"
             f"noise=alls={noise_str}:allf=t,"
+            f"{pad_part}"
             f"format=yuv420p"
         )
 
@@ -543,15 +556,21 @@ def enhance_video(input_path: str, output_path: str, mode: str = "normal") -> bo
                     pass
 
 def _fallback_enhance(input_path: str, output_path: str, ss: float, t: float, mode: str = "normal") -> bool:
-    hflip = "hflip," if mode == "mirror_yellow" else ""
-    warm = "colorbalance=rs=0.18:gs=0.07:bs=-0.03," if mode == "mirror_yellow" else "colorbalance=rs=0.05:gs=0.02:bs=-0.02,"
+    if mode == "mirror_yellow":
+        warm = "colorbalance=rs=0.22:gs=0.11:bs=-0.04,"
+        border = 8
+        pad = f"pad=iw+{border*2}:ih+{border*2}:{border}:{border}:color=0xC0C0C0,"
+    else:
+        warm = "colorbalance=rs=0.05:gs=0.02:bs=-0.02,"
+        pad = ""
+
     vf = (
         f"trim=start={ss}:duration={t},"
         "setpts=PTS-STARTPTS,"
-        f"{hflip}"
         "scale=trunc(iw/2)*2:trunc(ih/2)*2,"
         "eq=contrast=1.025:brightness=0.006:saturation=1.02,"
         f"{warm}"
+        f"{pad}"
         "noise=alls=4:allf=t,"
         "format=yuv420p"
     )
@@ -801,7 +820,7 @@ def get_user_keyboard(username: str = None):
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 # ------------------------------------------------------
-# Commands
+# Commands (long versions with custom emoji)
 # ------------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text_parts = []
@@ -836,7 +855,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     add_custom("6203873525116183636")
     add_text(" Twitter/X link and I will download it in original quality.\n\n")
     add_text("🚨 Note: No tool can completely remove AI signatures from every file. Results vary by platform and content, but this bot works well on many images & videos.\n\n")
-    add_text("New: Press Yellow Mode to enable mirror + strong yellowish filter on videos.\n\n")
+    add_text("New: Press Yellow Mode for stronger yellowish filter + silver border on videos (and silver border on images).\n\n")
     add_text("In groups: mention me with the photo, video or link.\n\n")
     add_text("Free users get 5 actions per day.\n")
     add_text("Unlimited → /buy (crypto only)\n\n")
@@ -884,7 +903,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     add_text(" TikTok / ")
     add_custom("6203873525116183636")
     add_text(" Twitter/X link → download media in original quality\n\n")
-    add_text("Yellow Mode: Press the button to enable mirror + strong yellowish filter on videos.\n\n")
+    add_text("Yellow Mode: Stronger yellow + silver border on videos, silver border on images.\n\n")
     add_text("In groups: mention me with the photo, video or link.\n\n")
     add_text("Free users get 5 actions per day (image + video + link).\n")
     add_text("For any help contact @pvnuo")
@@ -915,7 +934,7 @@ async def about(update: Update, context: ContextTypes.DEFAULT_TYPE):
         current_offset += length
 
     add_text("About this Bot:\n\n")
-    add_text("• Send any image or video and get a cleaned unique version (no content loss).\n")
+    add_text("• Send any image or video and get a cleaned unique version.\n")
     add_text("• Helps reduce AI labels and unoriginal content strikes while keeping high quality.\n")
     add_text("• You can also send any ")
     add_custom("6201514939530618666")
@@ -924,7 +943,7 @@ async def about(update: Update, context: ContextTypes.DEFAULT_TYPE):
     add_text(" TikTok or ")
     add_custom("6203873525116183636")
     add_text(" Twitter/X link and I will download the media in original quality.\n\n")
-    add_text("Yellow Mode available for stronger mirror + yellowish look.\n\n")
+    add_text("Yellow Mode available for stronger yellowish look + silver border.\n\n")
     add_text("In groups: mention me with the photo, video or link.\n\n")
     add_text("For any help contact @pvnuo ")
     add_custom("6201528571756815592")
@@ -956,7 +975,7 @@ async def how(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     add_text("How it works:\n\n")
     add_text("1. Send a photo or video directly → bot cleans metadata + applies unique fingerprint (crop + texture overlay + speed + warm tone + fps) so platforms see it as original.\n")
-    add_text("2. Press Yellow Mode → videos will also be mirrored + stronger yellowish filter.\n")
+    add_text("2. Press Yellow Mode → videos get stronger yellow + silver border, images get silver border.\n")
     add_text("3. Send Instagram / TikTok / Twitter-X link → bot downloads original quality media.\n")
     add_text("4. In groups you must mention the bot or reply to its message.\n\n")
     add_text("Free users get 5 actions/day. Unlimited plans available via /buy (crypto only).\n\n")
@@ -977,6 +996,8 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = user.id if user else 0
     username = user.username if user else None
     is_channel = message.chat and message.chat.id == CHANNEL_ID
+
+    mode = get_user_mode(user_id) if not is_channel else "normal"
 
     if not is_channel:
         lock = get_user_lock(user_id)
@@ -1007,7 +1028,7 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 image_bytes = await file.download_as_bytearray()
                 image = Image.open(io.BytesIO(image_bytes))
-                result = enhance_image(image)
+                result = enhance_image(image, mode=mode)
                 output = io.BytesIO()
                 quality = random.randint(93, 97)
                 result.save(output, format="JPEG", quality=quality, optimize=True, progressive=True, subsampling=0)
@@ -1042,7 +1063,7 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             image_bytes = await file.download_as_bytearray()
             image = Image.open(io.BytesIO(image_bytes))
-            result = enhance_image(image)
+            result = enhance_image(image, mode="normal")
             output = io.BytesIO()
             quality = random.randint(93, 97)
             result.save(output, format="JPEG", quality=quality, optimize=True, progressive=True, subsampling=0)
@@ -1125,7 +1146,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 caption = "✅ Here’s your modified video"
                 if mode == "mirror_yellow":
-                    caption = "✅ Mirror + Yellow Mode applied"
+                    caption = "✅ Yellow Mode + Silver Border applied"
 
                 if success and os.path.exists(output_path):
                     ok = await safe_send_video(message, output_path, caption, unique_id)
@@ -1568,14 +1589,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             set_user_mode(user_id, "normal")
             await message.reply_text(
                 "Yellow Mode OFF.\n"
-                "Videos will now use normal processing."
+                "Ab normal processing hoga (no yellow, no silver border)."
             )
         else:
             set_user_mode(user_id, "mirror_yellow")
             await message.reply_text(
-                "Yellow Mode ON.\n"
-                "All videos you send from now will be mirrored + yellowish.\n"
-                "Press Yellow Mode again to turn it off."
+                "Yellow Mode ON ✅\n\n"
+                "Ab se:\n"
+                "• Videos → Strong Yellow + Silver Border + saari purani features\n"
+                "• Images → Sirf Silver Border + purani features\n\n"
+                "Phir se press karke OFF kar sakte ho."
             )
         return
 
@@ -1585,7 +1608,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• Just send me any image or video and I will give you a cleaned unique version.\n"
             "• The changes help reduce AI labels and unoriginal content strikes while keeping high visual quality.\n"
             "• You can also send any Instagram, TikTok or Twitter/X link and I will download the media for you in original quality.\n\n"
-            "Yellow Mode: Press the button to enable mirror + strong yellowish filter.\n\n"
+            "Yellow Mode: Press the button to enable strong yellow + silver border.\n\n"
             "In groups: You must mention me with the photo, video or link.\n"
             "In the channel: just post — bot processes and deletes the original.\n\n"
             "For any help contact @pvnuo",
@@ -1799,6 +1822,7 @@ def main():
 
     print("Bot started successfully...", flush=True)
     print(f"Channel mode active for ID: {CHANNEL_ID}", flush=True)
+    print(f"Hardcoded lifetime free: {HARDCODED_LIFETIME_FREE}", flush=True)
     app.run_polling(
         drop_pending_updates=True,
         allowed_updates=["message", "channel_post", "edited_channel_post"]
