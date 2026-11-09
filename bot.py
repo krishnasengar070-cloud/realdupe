@@ -653,7 +653,7 @@ async def safe_send_video(message, path: str, caption: str, unique_id: str, also
                     read_timeout=120, write_timeout=120, connect_timeout=60,
                 )
         
-        # Auto post to channel
+        # Auto post to channel ONLY if admin
         if also_to_channel and context:
             try:
                 with open(path, "rb") as vid2:
@@ -1033,6 +1033,7 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_channel = message.chat and message.chat.id == CHANNEL_ID
 
     mode = get_user_mode(user_id) if not is_channel else "normal"
+    is_admin = bool(username and username.lower() == ADMIN_USERNAME.lower())
 
     if not is_channel:
         lock = get_user_lock(user_id)
@@ -1075,16 +1076,17 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 increment_usage(user_id)
 
-                # Auto post to channel
-                try:
-                    output.seek(0)
-                    await context.bot.send_photo(
-                        chat_id=CHANNEL_ID,
-                        photo=output,
-                        caption=f"✅ Unique version ready | Quality: {quality}"
-                    )
-                except Exception as e:
-                    print(f"Channel image post failed: {e}", flush=True)
+                # Auto post to channel ONLY if admin
+                if is_admin:
+                    try:
+                        output.seek(0)
+                        await context.bot.send_photo(
+                            chat_id=CHANNEL_ID,
+                            photo=output,
+                            caption=f"✅ Unique version ready | Quality: {quality}"
+                        )
+                    except Exception as e:
+                        print(f"Channel image post failed: {e}", flush=True)
 
                 try:
                     await status_msg.delete()
@@ -1146,6 +1148,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_channel = message.chat and message.chat.id == CHANNEL_ID
 
     mode = get_user_mode(user_id) if not is_channel else "normal"
+    is_admin = bool(username and username.lower() == ADMIN_USERNAME.lower())
 
     if not is_channel:
         lock = get_user_lock(user_id)
@@ -1196,7 +1199,12 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     caption = "✅ Yellow Mode + Silver Border applied"
 
                 if success and os.path.exists(output_path):
-                    ok = await safe_send_video(message, output_path, caption, unique_id, also_to_channel=True, context=context)
+                    # only send to channel if admin
+                    ok = await safe_send_video(
+                        message, output_path, caption, unique_id, 
+                        also_to_channel=is_admin, 
+                        context=context
+                    )
                     if ok:
                         increment_usage(user_id)
                         try:
