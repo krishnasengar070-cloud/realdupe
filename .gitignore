@@ -17,8 +17,6 @@ tw_*/
 venv/
 .idea/
 .vscode/
-cookies.txt
-instagram_cookies.txt
 *.session
 bot_data.db
 lifetime_free.json
