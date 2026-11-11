@@ -46,15 +46,12 @@ LIFETIME_FREE_FILE = os.path.join(DATA_DIR, "lifetime_free.json")
 CHANNEL_ID = -1004344831643
 
 HARDCODED_LIFETIME_FREE = [
-    5375098801,  # @dvenfr
-    6239058533,  # @guykatri
-    6758059603,  # @uqvie
-    7568357675,  # @timhinh
-    7592440493,  # @Xzen80
-    7702852287,  # @thetronerr
-    8039553042,  # @Mujutg
-    8120598671,  # @therealr1cky
-    8515030771,  # @ONlySolo0017
+    5375098801,
+    6239058533,
+    6758059603,
+    7568357675,
+    7702852287,
+    8039553042,
 ]
 # ====================================================
 
@@ -404,7 +401,6 @@ def enhance_image(image: Image.Image, mode: str = "normal") -> Image.Image:
     image = Image.blend(image, texture, random.uniform(0.025, 0.055))
 
     if mode == "mirror_yellow":
-        # images: only silver border + normal features (no yellow filter)
         border_size = random.randint(5, 9)
         silver = (192, 192, 192)
         image = ImageOps.expand(image, border=border_size, fill=silver)
@@ -476,15 +472,10 @@ def enhance_video(input_path: str, output_path: str, mode: str = "normal") -> bo
         overlay_opacity = random.uniform(0.035, 0.075)
 
         if mode == "mirror_yellow":
-            # strong golden-yellow matching the 2 reels
-            warm_rs = random.uniform(0.22, 0.32)
-            warm_gs = random.uniform(0.11, 0.18)
+            warm_rs = random.uniform(0.17, 0.26)
+            warm_gs = random.uniform(0.07, 0.13)
             border = random.randint(6, 10)
             pad_part = f"pad=iw+{border*2}:ih+{border*2}:{border}:{border}:color=0xC0C0C0,"
-            noise_str = random.randint(6, 11)
-            contrast = random.uniform(1.03, 1.07)
-            saturation = random.uniform(1.05, 1.14)
-            brightness = random.uniform(0.01, 0.025)
         else:
             warm_rs = random.uniform(0.03, 0.07)
             warm_gs = random.uniform(0.01, 0.035)
@@ -570,7 +561,7 @@ def enhance_video(input_path: str, output_path: str, mode: str = "normal") -> bo
 
 def _fallback_enhance(input_path: str, output_path: str, ss: float, t: float, mode: str = "normal") -> bool:
     if mode == "mirror_yellow":
-        warm = "colorbalance=rs=0.26:gs=0.14:bs=-0.04,"
+        warm = "colorbalance=rs=0.20:gs=0.09:bs=-0.03,"
         border = 7
         pad = f"pad=iw+{border*2}:ih+{border*2}:{border}:{border}:color=0xC0C0C0,"
     else:
@@ -1311,97 +1302,41 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Instagram Download
 # ------------------------------------------------------
 def download_instagram(url: str, unique_id: str):
-    """Multi-fallback Instagram downloader (yt-dlp → gallery-dl → instaloader)"""
+    L = instaloader.Instaloader(
+        download_videos=True,
+        download_video_thumbnails=False,
+        download_geotags=False,
+        download_comments=False,
+        save_metadata=False,
+        compress_json=False,
+        post_metadata_txt_pattern="",
+        max_connection_attempts=3,
+    )
+    shortcode = None
+    if "/p/" in url:
+        shortcode = url.split("/p/")[1].split("/")[0].split("?")[0]
+    elif "/reel/" in url:
+        shortcode = url.split("/reel/")[1].split("/")[0].split("?")[0]
+    elif "/tv/" in url:
+        shortcode = url.split("/tv/")[1].split("/")[0].split("?")[0]
+    if not shortcode:
+        return []
+    try:
+        post = instaloader.Post.from_shortcode(L.context, shortcode)
+    except Exception as e:
+        print(f"Instaloader error: {e}", flush=True)
+        return []
     paths = []
     folder = f"temp_{unique_id}"
     os.makedirs(folder, exist_ok=True)
-
-    # 1) yt-dlp first (usually most reliable)
     try:
-        ydl_opts = {
-            "outtmpl": os.path.join(folder, f"ig_{unique_id}.%(ext)s"),
-            "quiet": True,
-            "no_warnings": True,
-            "format": "bv*+ba/b",
-            "merge_output_format": "mp4",
-            "socket_timeout": 60,
-            "retries": 5,
-            "http_headers": {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-                "Referer": "https://www.instagram.com/",
-            },
-        }
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            filename = ydl.prepare_filename(info)
-            base = filename.rsplit(".", 1)[0]
-            for ext in [".mp4", ".mkv", ".webm", ".jpg", ".jpeg", ".png", ".webp"]:
-                candidate = base + ext
-                if os.path.exists(candidate):
-                    paths.append(candidate)
-            if not paths and os.path.exists(filename):
-                paths.append(filename)
-        if paths:
-            print(f"[IG] yt-dlp success: {len(paths)} file(s)", flush=True)
-            return paths
+        L.download_post(post, target=folder)
+        for file in os.listdir(folder):
+            full = os.path.join(folder, file)
+            if file.endswith((".jpg", ".jpeg", ".png", ".webp", ".mp4")):
+                paths.append(full)
     except Exception as e:
-        print(f"[IG] yt-dlp failed: {e}", flush=True)
-
-    # 2) gallery-dl fallback
-    try:
-        cmd = [
-            "gallery-dl",
-            "--dest", folder,
-            "--filename", f"ig_{unique_id}_{{id}}_{{num}}.{{extension}}",
-            "--no-mtime",
-            url
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
-        if result.returncode == 0:
-            for root, _, files in os.walk(folder):
-                for f in files:
-                    full = os.path.join(root, f)
-                    if f.lower().endswith((".jpg", ".jpeg", ".png", ".webp", ".mp4", ".mkv", ".webm")):
-                        paths.append(full)
-            if paths:
-                print(f"[IG] gallery-dl success: {len(paths)} file(s)", flush=True)
-                return paths
-        else:
-            print(f"[IG] gallery-dl stderr: {result.stderr[-300:] if result.stderr else ''}", flush=True)
-    except Exception as e:
-        print(f"[IG] gallery-dl failed: {e}", flush=True)
-
-    # 3) instaloader last resort
-    try:
-        L = instaloader.Instaloader(
-            download_videos=True,
-            download_video_thumbnails=False,
-            download_geotags=False,
-            download_comments=False,
-            save_metadata=False,
-            compress_json=False,
-            post_metadata_txt_pattern="",
-            max_connection_attempts=3,
-        )
-        shortcode = None
-        if "/p/" in url:
-            shortcode = url.split("/p/")[1].split("/")[0].split("?")[0]
-        elif "/reel/" in url:
-            shortcode = url.split("/reel/")[1].split("/")[0].split("?")[0]
-        elif "/tv/" in url:
-            shortcode = url.split("/tv/")[1].split("/")[0].split("?")[0]
-        if shortcode:
-            post = instaloader.Post.from_shortcode(L.context, shortcode)
-            L.download_post(post, target=folder)
-            for file in os.listdir(folder):
-                full = os.path.join(folder, file)
-                if file.endswith((".jpg", ".jpeg", ".png", ".webp", ".mp4")):
-                    paths.append(full)
-            if paths:
-                print(f"[IG] instaloader success: {len(paths)} file(s)", flush=True)
-    except Exception as e:
-        print(f"[IG] instaloader failed: {e}", flush=True)
-
+        print(f"Download post error: {e}", flush=True)
     return paths
 
 # ------------------------------------------------------
