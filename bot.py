@@ -46,12 +46,15 @@ LIFETIME_FREE_FILE = os.path.join(DATA_DIR, "lifetime_free.json")
 CHANNEL_ID = -1004344831643
 
 HARDCODED_LIFETIME_FREE = [
-    5375098801,
-    6239058533,
-    6758059603,
-    7568357675,
-    7702852287,
-    8039553042,
+    5375098801,  # @dvenfr
+    6239058533,  # @guykatri
+    6758059603,  # @uqvie
+    7568357675,  # @timhinh
+    7592440493,  # @Xzen80
+    7702852287,  # @thetronerr
+    8039553042,  # @Mujutg
+    8120598671,  # @therealr1cky
+    8515030771,  # @ONlySolo0017
 ]
 # ====================================================
 
@@ -401,6 +404,7 @@ def enhance_image(image: Image.Image, mode: str = "normal") -> Image.Image:
     image = Image.blend(image, texture, random.uniform(0.025, 0.055))
 
     if mode == "mirror_yellow":
+        # images: only silver border + normal features (no yellow filter)
         border_size = random.randint(5, 9)
         silver = (192, 192, 192)
         image = ImageOps.expand(image, border=border_size, fill=silver)
@@ -472,10 +476,15 @@ def enhance_video(input_path: str, output_path: str, mode: str = "normal") -> bo
         overlay_opacity = random.uniform(0.035, 0.075)
 
         if mode == "mirror_yellow":
-            warm_rs = random.uniform(0.17, 0.26)
-            warm_gs = random.uniform(0.07, 0.13)
+            # strong golden-yellow matching the 2 reels
+            warm_rs = random.uniform(0.22, 0.32)
+            warm_gs = random.uniform(0.11, 0.18)
             border = random.randint(6, 10)
             pad_part = f"pad=iw+{border*2}:ih+{border*2}:{border}:{border}:color=0xC0C0C0,"
+            noise_str = random.randint(6, 11)
+            contrast = random.uniform(1.03, 1.07)
+            saturation = random.uniform(1.05, 1.14)
+            brightness = random.uniform(0.01, 0.025)
         else:
             warm_rs = random.uniform(0.03, 0.07)
             warm_gs = random.uniform(0.01, 0.035)
@@ -561,7 +570,7 @@ def enhance_video(input_path: str, output_path: str, mode: str = "normal") -> bo
 
 def _fallback_enhance(input_path: str, output_path: str, ss: float, t: float, mode: str = "normal") -> bool:
     if mode == "mirror_yellow":
-        warm = "colorbalance=rs=0.20:gs=0.09:bs=-0.03,"
+        warm = "colorbalance=rs=0.26:gs=0.14:bs=-0.04,"
         border = 7
         pad = f"pad=iw+{border*2}:ih+{border*2}:{border}:{border}:color=0xC0C0C0,"
     else:
@@ -1302,42 +1311,145 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Instagram Download
 # ------------------------------------------------------
 def download_instagram(url: str, unique_id: str):
-    L = instaloader.Instaloader(
-        download_videos=True,
-        download_video_thumbnails=False,
-        download_geotags=False,
-        download_comments=False,
-        save_metadata=False,
-        compress_json=False,
-        post_metadata_txt_pattern="",
-        max_connection_attempts=3,
-    )
-    shortcode = None
-    if "/p/" in url:
-        shortcode = url.split("/p/")[1].split("/")[0].split("?")[0]
-    elif "/reel/" in url:
-        shortcode = url.split("/reel/")[1].split("/")[0].split("?")[0]
-    elif "/tv/" in url:
-        shortcode = url.split("/tv/")[1].split("/")[0].split("?")[0]
-    if not shortcode:
-        return []
-    try:
-        post = instaloader.Post.from_shortcode(L.context, shortcode)
-    except Exception as e:
-        print(f"Instaloader error: {e}", flush=True)
-        return []
+    """Multi-fallback Instagram downloader with cookies support"""
     paths = []
     folder = f"temp_{unique_id}"
     os.makedirs(folder, exist_ok=True)
+
+    # look for cookies file (put cookies.txt next to bot.py)
+    cookie_candidates = [
+        "cookies.txt",
+        "instagram_cookies.txt",
+        os.path.join(DATA_DIR, "cookies.txt"),
+        os.path.join(DATA_DIR, "instagram_cookies.txt"),
+    ]
+    cookiefile = None
+    for c in cookie_candidates:
+        if os.path.exists(c) and os.path.getsize(c) > 50:
+            cookiefile = c
+            print(f"[IG] using cookies: {c}", flush=True)
+            break
+
+    common_headers = {
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+        "Accept": "*/*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.instagram.com/",
+        "Origin": "https://www.instagram.com",
+    }
+
+    # 1) yt-dlp
     try:
-        L.download_post(post, target=folder)
-        for file in os.listdir(folder):
-            full = os.path.join(folder, file)
-            if file.endswith((".jpg", ".jpeg", ".png", ".webp", ".mp4")):
-                paths.append(full)
+        ydl_opts = {
+            "outtmpl": os.path.join(folder, f"ig_{unique_id}.%(ext)s"),
+            "quiet": True,
+            "no_warnings": True,
+            "format": "bv*+ba/b",
+            "merge_output_format": "mp4",
+            "socket_timeout": 60,
+            "retries": 8,
+            "fragment_retries": 8,
+            "http_headers": common_headers,
+            "extractor_args": {"instagram": {"api": ["android"]}},
+        }
+        if cookiefile:
+            ydl_opts["cookiefile"] = cookiefile
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            if info is None:
+                raise Exception("empty info")
+            # single or playlist
+            entries = info.get("entries") or [info]
+            for entry in entries:
+                if not entry:
+                    continue
+                filename = ydl.prepare_filename(entry)
+                base = filename.rsplit(".", 1)[0]
+                found = False
+                for ext in [".mp4", ".mkv", ".webm", ".jpg", ".jpeg", ".png", ".webp"]:
+                    candidate = base + ext
+                    if os.path.exists(candidate):
+                        paths.append(candidate)
+                        found = True
+                if not found and os.path.exists(filename):
+                    paths.append(filename)
+        if paths:
+            print(f"[IG] yt-dlp success: {len(paths)} file(s)", flush=True)
+            return paths
     except Exception as e:
-        print(f"Download post error: {e}", flush=True)
+        print(f"[IG] yt-dlp failed: {e}", flush=True)
+
+    # 2) gallery-dl
+    try:
+        cmd = [
+            "gallery-dl",
+            "--dest", folder,
+            "--filename", f"ig_{unique_id}_{{id}}_{{num}}.{{extension}}",
+            "--no-mtime",
+            "-o", "browser=firefox",
+        ]
+        if cookiefile:
+            cmd.extend(["--cookies", cookiefile])
+        cmd.append(url)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if result.returncode == 0:
+            for root, _, files in os.walk(folder):
+                for f in files:
+                    full = os.path.join(root, f)
+                    if f.lower().endswith((".jpg", ".jpeg", ".png", ".webp", ".mp4", ".mkv", ".webm")):
+                        paths.append(full)
+            if paths:
+                print(f"[IG] gallery-dl success: {len(paths)} file(s)", flush=True)
+                return paths
+        else:
+            err = (result.stderr or result.stdout or "")[-400:]
+            print(f"[IG] gallery-dl failed: {err}", flush=True)
+    except Exception as e:
+        print(f"[IG] gallery-dl error: {e}", flush=True)
+
+    # 3) instaloader last
+    try:
+        L = instaloader.Instaloader(
+            dirname_pattern=folder,
+            filename_pattern=f"ig_{unique_id}",
+            download_videos=True,
+            download_video_thumbnails=False,
+            download_geotags=False,
+            download_comments=False,
+            save_metadata=False,
+            compress_json=False,
+            quiet=True,
+        )
+        if cookiefile:
+            try:
+                L.load_session_from_file("instagram", cookiefile)
+            except Exception:
+                pass
+        shortcode = None
+        if "/p/" in url:
+            shortcode = url.split("/p/")[1].split("/")[0].split("?")[0]
+        elif "/reel/" in url:
+            shortcode = url.split("/reel/")[1].split("/")[0].split("?")[0]
+        elif "/tv/" in url:
+            shortcode = url.split("/tv/")[1].split("/")[0].split("?")[0]
+        if shortcode:
+            post = instaloader.Post.from_shortcode(L.context, shortcode)
+            L.download_post(post, target=folder)
+            for root, _, files in os.walk(folder):
+                for f in files:
+                    full = os.path.join(root, f)
+                    if f.lower().endswith((".jpg", ".jpeg", ".png", ".webp", ".mp4")):
+                        paths.append(full)
+            if paths:
+                print(f"[IG] instaloader success: {len(paths)} file(s)", flush=True)
+                return paths
+    except Exception as e:
+        print(f"[IG] instaloader failed: {e}", flush=True)
+
+    print("[IG] all methods failed", flush=True)
     return paths
+
+
 
 # ------------------------------------------------------
 # TikTok Download
@@ -1797,14 +1909,21 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         pass
             else:
                 try:
-                    await status_text.edit_text("❌ Failed. Make sure link is public.")
+                    await status_text.edit_text(
+                        "❌ Instagram download failed.\n\n"
+                        "Reason: Instagram is blocking anonymous downloads (rate-limit / login wall).\n\n"
+                        "Fix: Put a valid cookies.txt file next to bot.py (export from browser while logged into Instagram)."
+                    )
                     await status_emoji.delete()
                 except Exception:
                     pass
         except Exception as e:
             print(f"IG error: {e}", flush=True)
             try:
-                await status_text.edit_text("❌ Failed to download.")
+                await status_text.edit_text(
+                    "❌ Instagram download failed.\n\n"
+                    "Instagram is currently blocking the request. Try again later or add cookies.txt."
+                )
                 await status_emoji.delete()
             except Exception:
                 pass
@@ -1906,3 +2025,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
