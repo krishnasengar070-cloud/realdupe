@@ -1319,13 +1319,19 @@ def download_instagram(url: str, unique_id: str):
     # look for cookies file (put cookies.txt next to bot.py)
     cookie_candidates = [
         "cookies.txt",
+        "cookies",
         "instagram_cookies.txt",
         os.path.join(DATA_DIR, "cookies.txt"),
+        os.path.join(DATA_DIR, "cookies"),
         os.path.join(DATA_DIR, "instagram_cookies.txt"),
         os.path.join(os.getcwd(), "cookies.txt"),
+        os.path.join(os.getcwd(), "cookies"),
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies"),
         "/app/cookies.txt",
+        "/app/cookies",
         "/workspace/cookies.txt",
+        "/workspace/cookies",
     ]
     cookiefile = None
     print(f"[IG] cwd={os.getcwd()} files={os.listdir('.')[:30]}", flush=True)
