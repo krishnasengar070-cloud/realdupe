@@ -404,27 +404,7 @@ def enhance_image(image: Image.Image, mode: str = "normal") -> Image.Image:
     image = Image.blend(image, texture, random.uniform(0.025, 0.055))
 
     if mode == "mirror_yellow":
-        # strong golden-yellow grade (matching the 2 reels)
-        r, g, b = image.split()
-        r = ImageEnhance.Brightness(r).enhance(random.uniform(1.14, 1.22))
-        g = ImageEnhance.Brightness(g).enhance(random.uniform(1.06, 1.12))
-        b = ImageEnhance.Brightness(b).enhance(random.uniform(0.78, 0.88))
-        image = Image.merge("RGB", (r, g, b))
-        image = ImageEnhance.Color(image).enhance(random.uniform(1.08, 1.18))
-        image = ImageEnhance.Contrast(image).enhance(random.uniform(1.04, 1.10))
-
-        # particle / film-grain overlay (matching the black particle clip)
-        particles = Image.effect_noise(image.size, random.uniform(18, 32)).convert("L")
-        particles = ImageEnhance.Brightness(particles).enhance(random.uniform(0.35, 0.55))
-        particles = particles.point(lambda p: 255 if p > 210 else 0)
-        particles = particles.filter(ImageFilter.GaussianBlur(radius=random.uniform(0.4, 0.9)))
-        particle_rgb = Image.merge("RGB", (particles, particles, particles))
-        image = Image.blend(image, particle_rgb, random.uniform(0.06, 0.11))
-
-        grain = Image.effect_noise(image.size, random.uniform(12, 22)).convert("RGB")
-        grain = ImageEnhance.Brightness(grain).enhance(random.uniform(0.45, 0.65))
-        image = Image.blend(image, grain, random.uniform(0.04, 0.08))
-
+        # images: only silver border + normal features (no yellow filter)
         border_size = random.randint(5, 9)
         silver = (192, 192, 192)
         image = ImageOps.expand(image, border=border_size, fill=silver)
