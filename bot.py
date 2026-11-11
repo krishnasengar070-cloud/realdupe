@@ -1322,13 +1322,23 @@ def download_instagram(url: str, unique_id: str):
         "instagram_cookies.txt",
         os.path.join(DATA_DIR, "cookies.txt"),
         os.path.join(DATA_DIR, "instagram_cookies.txt"),
+        os.path.join(os.getcwd(), "cookies.txt"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt"),
+        "/app/cookies.txt",
+        "/workspace/cookies.txt",
     ]
     cookiefile = None
+    print(f"[IG] cwd={os.getcwd()} files={os.listdir('.')[:30]}", flush=True)
     for c in cookie_candidates:
-        if os.path.exists(c) and os.path.getsize(c) > 50:
-            cookiefile = c
-            print(f"[IG] using cookies: {c}", flush=True)
-            break
+        try:
+            if os.path.exists(c) and os.path.getsize(c) > 50:
+                cookiefile = c
+                print(f"[IG] using cookies: {c}", flush=True)
+                break
+        except Exception:
+            pass
+    if not cookiefile:
+        print("[IG] NO cookies.txt found in any path", flush=True)
 
     common_headers = {
         "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
