@@ -46,12 +46,15 @@ LIFETIME_FREE_FILE = os.path.join(DATA_DIR, "lifetime_free.json")
 CHANNEL_ID = -1004344831643
 
 HARDCODED_LIFETIME_FREE = [
-    5375098801,
-    6239058533,
-    6758059603,
-    7568357675,
-    7702852287,
-    8039553042,
+    5375098801,  # @dvenfr
+    6239058533,  # @guykatri
+    6758059603,  # @uqvie
+    7568357675,  # @timhinh
+    7592440493,  # @Xzen80
+    7702852287,  # @thetronerr
+    8039553042,  # @Mujutg
+    8120598671,  # @therealr1cky
+    8515030771,  # @ONlySolo0017
 ]
 # ====================================================
 
