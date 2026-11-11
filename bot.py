@@ -1311,41 +1311,97 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Instagram Download
 # ------------------------------------------------------
 def download_instagram(url: str, unique_id: str):
-    L = instaloader.Instaloader(
-        download_videos=True,
-        download_video_thumbnails=False,
-        download_geotags=False,
-        download_comments=False,
-        save_metadata=False,
-        compress_json=False,
-        post_metadata_txt_pattern="",
-        max_connection_attempts=3,
-    )
-    shortcode = None
-    if "/p/" in url:
-        shortcode = url.split("/p/")[1].split("/")[0].split("?")[0]
-    elif "/reel/" in url:
-        shortcode = url.split("/reel/")[1].split("/")[0].split("?")[0]
-    elif "/tv/" in url:
-        shortcode = url.split("/tv/")[1].split("/")[0].split("?")[0]
-    if not shortcode:
-        return []
-    try:
-        post = instaloader.Post.from_shortcode(L.context, shortcode)
-    except Exception as e:
-        print(f"Instaloader error: {e}", flush=True)
-        return []
+    """Multi-fallback Instagram downloader (yt-dlp → gallery-dl → instaloader)"""
     paths = []
     folder = f"temp_{unique_id}"
     os.makedirs(folder, exist_ok=True)
+
+    # 1) yt-dlp first (usually most reliable)
     try:
-        L.download_post(post, target=folder)
-        for file in os.listdir(folder):
-            full = os.path.join(folder, file)
-            if file.endswith((".jpg", ".jpeg", ".png", ".webp", ".mp4")):
-                paths.append(full)
+        ydl_opts = {
+            "outtmpl": os.path.join(folder, f"ig_{unique_id}.%(ext)s"),
+            "quiet": True,
+            "no_warnings": True,
+            "format": "bv*+ba/b",
+            "merge_output_format": "mp4",
+            "socket_timeout": 60,
+            "retries": 5,
+            "http_headers": {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                "Referer": "https://www.instagram.com/",
+            },
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            filename = ydl.prepare_filename(info)
+            base = filename.rsplit(".", 1)[0]
+            for ext in [".mp4", ".mkv", ".webm", ".jpg", ".jpeg", ".png", ".webp"]:
+                candidate = base + ext
+                if os.path.exists(candidate):
+                    paths.append(candidate)
+            if not paths and os.path.exists(filename):
+                paths.append(filename)
+        if paths:
+            print(f"[IG] yt-dlp success: {len(paths)} file(s)", flush=True)
+            return paths
     except Exception as e:
-        print(f"Download post error: {e}", flush=True)
+        print(f"[IG] yt-dlp failed: {e}", flush=True)
+
+    # 2) gallery-dl fallback
+    try:
+        cmd = [
+            "gallery-dl",
+            "--dest", folder,
+            "--filename", f"ig_{unique_id}_{{id}}_{{num}}.{{extension}}",
+            "--no-mtime",
+            url
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
+        if result.returncode == 0:
+            for root, _, files in os.walk(folder):
+                for f in files:
+                    full = os.path.join(root, f)
+                    if f.lower().endswith((".jpg", ".jpeg", ".png", ".webp", ".mp4", ".mkv", ".webm")):
+                        paths.append(full)
+            if paths:
+                print(f"[IG] gallery-dl success: {len(paths)} file(s)", flush=True)
+                return paths
+        else:
+            print(f"[IG] gallery-dl stderr: {result.stderr[-300:] if result.stderr else ''}", flush=True)
+    except Exception as e:
+        print(f"[IG] gallery-dl failed: {e}", flush=True)
+
+    # 3) instaloader last resort
+    try:
+        L = instaloader.Instaloader(
+            download_videos=True,
+            download_video_thumbnails=False,
+            download_geotags=False,
+            download_comments=False,
+            save_metadata=False,
+            compress_json=False,
+            post_metadata_txt_pattern="",
+            max_connection_attempts=3,
+        )
+        shortcode = None
+        if "/p/" in url:
+            shortcode = url.split("/p/")[1].split("/")[0].split("?")[0]
+        elif "/reel/" in url:
+            shortcode = url.split("/reel/")[1].split("/")[0].split("?")[0]
+        elif "/tv/" in url:
+            shortcode = url.split("/tv/")[1].split("/")[0].split("?")[0]
+        if shortcode:
+            post = instaloader.Post.from_shortcode(L.context, shortcode)
+            L.download_post(post, target=folder)
+            for file in os.listdir(folder):
+                full = os.path.join(folder, file)
+                if file.endswith((".jpg", ".jpeg", ".png", ".webp", ".mp4")):
+                    paths.append(full)
+            if paths:
+                print(f"[IG] instaloader success: {len(paths)} file(s)", flush=True)
+    except Exception as e:
+        print(f"[IG] instaloader failed: {e}", flush=True)
+
     return paths
 
 # ------------------------------------------------------
