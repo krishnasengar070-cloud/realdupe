@@ -54,7 +54,9 @@ HARDCODED_LIFETIME_FREE = [
     7702852287,  # @thetronerr
     8039553042,  # @Mujutg
     8120598671,  # @therealr1cky
+    8204082531,  # @novasalot
     8515030771,  # @ONlySolo0017
+    8675984996,  # @yapflx
 ]
 # ====================================================
 
@@ -476,15 +478,15 @@ def enhance_video(input_path: str, output_path: str, mode: str = "normal") -> bo
         overlay_opacity = random.uniform(0.035, 0.075)
 
         if mode == "mirror_yellow":
-            # strong golden-yellow matching the 2 reels
-            warm_rs = random.uniform(0.22, 0.32)
-            warm_gs = random.uniform(0.11, 0.18)
+            # mild clean warm yellow (not dirty/heavy)
+            warm_rs = random.uniform(0.06, 0.10)
+            warm_gs = random.uniform(0.03, 0.06)
             border = random.randint(6, 10)
             pad_part = f"pad=iw+{border*2}:ih+{border*2}:{border}:{border}:color=0xC0C0C0,"
-            noise_str = random.randint(6, 11)
-            contrast = random.uniform(1.03, 1.07)
-            saturation = random.uniform(1.05, 1.14)
-            brightness = random.uniform(0.01, 0.025)
+            noise_str = random.randint(2, 5)
+            contrast = random.uniform(1.01, 1.04)
+            saturation = random.uniform(1.01, 1.05)
+            brightness = random.uniform(0.002, 0.012)
         else:
             warm_rs = random.uniform(0.03, 0.07)
             warm_gs = random.uniform(0.01, 0.035)
@@ -570,7 +572,7 @@ def enhance_video(input_path: str, output_path: str, mode: str = "normal") -> bo
 
 def _fallback_enhance(input_path: str, output_path: str, ss: float, t: float, mode: str = "normal") -> bool:
     if mode == "mirror_yellow":
-        warm = "colorbalance=rs=0.26:gs=0.14:bs=-0.04,"
+        warm = "colorbalance=rs=0.08:gs=0.04:bs=-0.02,"
         border = 7
         pad = f"pad=iw+{border*2}:ih+{border*2}:{border}:{border}:color=0xC0C0C0,"
     else:
@@ -1800,7 +1802,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await message.reply_text(
                 "Yellow Mode ON ✅\n\n"
                 "From now on:\n"
-                "• Videos → Strong Yellow filter + Silver Border + all existing features\n"
+                "• Videos → Mild warm yellow + Silver Border + all existing features\n"
                 "• Images → Silver Border + all existing features\n\n"
                 "Press Yellow Mode again to turn it off."
             )
