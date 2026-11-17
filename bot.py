@@ -1300,8 +1300,10 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         image.save(tmp_bg, "JPEG", quality=95)
                         save_user_bg(user_id, tmp_bg)
                         await message.reply_text(
-                            "✅ Background saved for Overlay Mode.\n\n"
-                            "Now send any video — it will be placed on this background (9:16) with lightning border."
+                            "✅ Background saved.\n\n"
+                            "Now send any video you want on top of this background.\n"
+                            "Short GIF/video backgrounds will auto-loop to match the full video length.\n\n"
+                            "Press Overlay Mode again to turn this OFF."
                         )
                         try:
                             await status_msg.delete()
@@ -1456,9 +1458,11 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if not bg_existing:
                         save_user_bg(user_id, input_path)
                         await message.reply_text(
-                            "✅ Background saved for Overlay Mode.\n\n"
-                            "Now send any video — it will be placed on this background (9:16) with lightning border.\n"
-                            "Send another image/GIF/video anytime to replace the background."
+                            "✅ Background saved.\n\n"
+                            "Now send any video you want on top of this background.\n"
+                            "Short GIF/video backgrounds will auto-loop to match the full video length.\n"
+                            "Send another image/GIF/video anytime to replace the background.\n\n"
+                            "Press Overlay Mode again to turn this OFF."
                         )
                         try:
                             await status_msg.delete()
@@ -1609,8 +1613,10 @@ async def handle_animation(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await file.download_to_drive(path)
         save_user_bg(user_id, path)
         await message.reply_text(
-            "✅ GIF background saved for Overlay Mode.\n\n"
-            "Now send any video — it will be placed on this looping background (9:16) with lightning border."
+            "✅ Background saved.\n\n"
+            "Now send any video you want on top of this background.\n"
+            "This GIF will auto-loop to match the full video length.\n\n"
+            "Press Overlay Mode again to turn this OFF."
         )
         try:
             await status_msg.delete()
@@ -2135,24 +2141,26 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             set_overlay_on(user_id, False)
             await message.reply_text(
                 "Overlay Mode OFF.\n"
-                "Videos will process normally again."
+                "Videos will process normally again.\n"
+                "Press Overlay Mode anytime to turn it back on."
             )
         else:
             set_overlay_on(user_id, True)
             if bg:
                 await message.reply_text(
                     "Overlay Mode ON ✅\n\n"
-                    "Background is already set.\n"
-                    "• Send any video → it will be placed on your background (9:16) with lightning border.\n"
-                    "• Send a new image/GIF anytime to replace the background.\n\n"
-                    "Press Overlay Mode again to turn it off."
+                    "Background is already saved.\n\n"
+                    "• Send any video → it will be placed on top of your background (9:16 + border).\n"
+                    "• Short background GIF/video will auto-loop for the full video length.\n"
+                    "• Send a new image/GIF/video to replace the background.\n\n"
+                    "Press Overlay Mode again to turn it OFF."
                 )
             else:
                 await message.reply_text(
                     "Overlay Mode ON ✅\n\n"
-                    "Now send an image or GIF — it will be saved as your background.\n"
-                    "After that, every video you send will be overlaid on that background (Reel 9:16 + lightning border).\n\n"
-                    "Press Overlay Mode again to turn it off."
+                    "Send an image, GIF, or short video now — I will save it as your background.\n\n"
+                    "After it is saved, send any video and I will place it on top of that background.\n"
+                    "Press Overlay Mode again to turn it OFF."
                 )
         return
 
