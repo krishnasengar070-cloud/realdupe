@@ -62,6 +62,7 @@ HARDCODED_LIFETIME_FREE = [
     8515030771,  # @ONlySolo0017
     8675984996,  # @yapflx
     8933599082,  # @gghtfda
+    1648712789,  # permanent free
 ]
 # ====================================================
 
@@ -1995,9 +1996,10 @@ def main():
         Application.builder()
         .token(BOT_TOKEN)
         .connect_timeout(60.0)
-        .read_timeout(120.0)
-        .write_timeout(120.0)
+        .read_timeout(180.0)
+        .write_timeout(180.0)
         .pool_timeout(60.0)
+        .get_updates_read_timeout(60.0)
         .build()
     )
     app.add_handler(CommandHandler("start", start))
@@ -2055,10 +2057,21 @@ def main():
     print("Bot started successfully...", flush=True)
     print(f"Channel mode active for ID: {CHANNEL_ID}", flush=True)
     print(f"Hardcoded lifetime free: {HARDCODED_LIFETIME_FREE}", flush=True)
-    app.run_polling(
-        drop_pending_updates=True,
-        allowed_updates=["message", "channel_post", "edited_channel_post"]
-    )
+
+    # Restart loop: if polling dies (network blip / transient error), wait and start again
+    while True:
+        try:
+            app.run_polling(
+                drop_pending_updates=True,
+                allowed_updates=["message", "channel_post", "edited_channel_post"],
+                close_loop=False,
+            )
+        except Exception as e:
+            print(f"[RESTART] polling stopped: {e}", flush=True)
+            time.sleep(5)
+            print("[RESTART] starting polling again...", flush=True)
+            continue
+        break
 
 if __name__ == "__main__":
     main()
