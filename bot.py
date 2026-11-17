@@ -670,10 +670,18 @@ def _fallback_enhance(input_path: str, output_path: str, ss: float, t: float, mo
 
 
 
+
 def compose_overlay_video(bg_path: str, main_path: str, output_path: str) -> bool:
-    """Main video centered on 9:16 background with bright glow border. Simple reliable ffmpeg."""
+    """Reliable overlay: 9:16 bg + centered main + simple bright border."""
+    print(f"[OV] start bg={bg_path} main={main_path}", flush=True)
     if not shutil.which("ffmpeg"):
-        print("compose: no ffmpeg", flush=True)
+        print("[OV] no ffmpeg", flush=True)
+        return False
+    if not bg_path or not os.path.exists(bg_path):
+        print(f"[OV] bg missing: {bg_path}", flush=True)
+        return False
+    if not main_path or not os.path.exists(main_path):
+        print(f"[OV] main missing: {main_path}", flush=True)
         return False
 
     duration = 5.0
@@ -686,111 +694,103 @@ def compose_overlay_video(bg_path: str, main_path: str, output_path: str) -> boo
         if probe.stdout.strip():
             duration = max(float(probe.stdout.strip()), 0.5)
     except Exception as e:
-        print(f"compose duration probe: {e}", flush=True)
+        print(f"[OV] duration err: {e}", flush=True)
+
+    print(f"[OV] duration={duration} bg_size={os.path.getsize(bg_path)} main_size={os.path.getsize(main_path)}", flush=True)
 
     unique_id = str(int(time.time() * 1000))
-    temp_main = f"ov_main_{unique_id}.mp4"
-    temp_bg = f"ov_bg_{unique_id}.mp4"
-    temp_out = f"ov_tmp_{unique_id}.mp4"
-
-    # main panel size inside 1080x1920
-    mw, mh = 820, 1460
+    out_tmp = f"ov_out_{unique_id}.mp4"
     W, H = 1080, 1920
+    mw, mh = 800, 1422  # main panel
+
+    bg_ext = os.path.splitext(bg_path)[1].lower()
+    is_image = bg_ext in [".png", ".jpg", ".jpeg", ".webp"]
+
+    # Build input args for background
+    if is_image:
+        bg_args = ["-loop", "1", "-t", f"{duration + 0.5}", "-i", bg_path]
+    else:
+        bg_args = ["-stream_loop", "-1", "-t", f"{duration + 0.5}", "-i", bg_path]
+
+    # Single-pass filter: scale bg, scale+pad main with white border, overlay center
+    # border = pad with white then dark blue outer
+    fc = (
+        f"[0:v]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},setsar=1,fps=30,format=yuv420p[bg];"
+        f"[1:v]scale={mw}:{mh}:force_original_aspect_ratio=decrease,"
+        f"pad={mw}:{mh}:(ow-iw)/2:(oh-ih)/2:color=black,"
+        f"pad={mw+12}:{mh+12}:6:6:color=white,"
+        f"pad={mw+20}:{mh+20}:4:4:color=0x88CCFF,"
+        f"setsar=1,fps=30,format=yuv420p[fg];"
+        f"[bg][fg]overlay=(W-w)/2:(H-h)/2[outv]"
+    )
+
+    cmd = [
+        "ffmpeg", "-y",
+        *bg_args,
+        "-i", main_path,
+        "-filter_complex", fc,
+        "-map", "[outv]",
+        "-map", "1:a?",
+        "-t", str(duration),
+        "-c:v", "libx264",
+        "-preset", "ultrafast",
+        "-crf", "20",
+        "-c:a", "aac",
+        "-b:a", "128k",
+        "-ar", "44100",
+        "-ac", "2",
+        "-movflags", "+faststart",
+        "-pix_fmt", "yuv420p",
+        out_tmp
+    ]
 
     try:
-        # 1) prepare main video: scale + white/cyan border (lightning look)
-        vf_main = (
-            f"scale={mw}:{mh}:force_original_aspect_ratio=decrease,"
-            f"pad={mw}:{mh}:(ow-iw)/2:(oh-ih)/2:color=black,"
-            f"setsar=1,"
-            f"pad={mw+16}:{mh+16}:8:8:color=0xCCEEFF,"
-            f"pad={mw+28}:{mh+28}:6:6:color=0x66AADD,"
-            f"pad={mw+36}:{mh+36}:4:4:color=0x2244AA,"
-            f"format=yuv420p"
-        )
-        cmd1 = [
-            "ffmpeg", "-y", "-i", main_path,
-            "-vf", vf_main,
-            "-an",
-            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20",
-            "-pix_fmt", "yuv420p",
-            "-t", str(duration),
-            temp_main
-        ]
-        r1 = subprocess.run(cmd1, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300, text=True)
-        if r1.returncode != 0 or not os.path.exists(temp_main):
-            print("compose main failed:", (r1.stderr or "")[-1000:], flush=True)
-            return False
-
-        # 2) prepare background as 1080x1920 video of same duration
-        bg_ext = os.path.splitext(bg_path)[1].lower()
-        is_image = bg_ext in [".png", ".jpg", ".jpeg", ".webp"]
-
-        if is_image:
-            cmd_bg = [
+        print(f"[OV] running ffmpeg...", flush=True)
+        r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=600, text=True)
+        if r.returncode != 0:
+            print(f"[OV] ffmpeg fail code={r.returncode}", flush=True)
+            print((r.stderr or "")[-1500:], flush=True)
+            # fallback without audio + simpler border
+            fc2 = (
+                f"[0:v]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},setsar=1,fps=30[bg];"
+                f"[1:v]scale={mw}:{mh}:force_original_aspect_ratio=decrease,"
+                f"pad={mw}:{mh}:(ow-iw)/2:(oh-ih)/2:color=black,"
+                f"pad={mw+16}:{mh+16}:8:8:color=white,setsar=1,fps=30[fg];"
+                f"[bg][fg]overlay=(W-w)/2:(H-h)/2[outv]"
+            )
+            cmd2 = [
                 "ffmpeg", "-y",
-                "-loop", "1", "-t", str(duration + 0.2),
-                "-i", bg_path,
-                "-vf", f"scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},setsar=1,fps=30,format=yuv420p",
+                *bg_args,
+                "-i", main_path,
+                "-filter_complex", fc2,
+                "-map", "[outv]",
+                "-an",
+                "-t", str(duration),
                 "-c:v", "libx264", "-preset", "ultrafast", "-crf", "22",
                 "-pix_fmt", "yuv420p",
-                "-an",
-                temp_bg
+                out_tmp
             ]
-        else:
-            # gif or video — loop to cover duration
-            cmd_bg = [
-                "ffmpeg", "-y",
-                "-stream_loop", "-1",
-                "-i", bg_path,
-                "-t", str(duration + 0.2),
-                "-vf", f"scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},setsar=1,fps=30,format=yuv420p",
-                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "22",
-                "-pix_fmt", "yuv420p",
-                "-an",
-                temp_bg
-            ]
-        r_bg = subprocess.run(cmd_bg, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300, text=True)
-        if r_bg.returncode != 0 or not os.path.exists(temp_bg):
-            print("compose bg failed:", (r_bg.stderr or "")[-1000:], flush=True)
+            r2 = subprocess.run(cmd2, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=600, text=True)
+            if r2.returncode != 0 or not os.path.exists(out_tmp):
+                print(f"[OV] fallback also failed:", (r2.stderr or "")[-1200:], flush=True)
+                return False
+
+        if not os.path.exists(out_tmp) or os.path.getsize(out_tmp) < 3000:
+            print(f"[OV] output too small or missing", flush=True)
             return False
 
-        # 3) overlay main centered on bg + copy audio from original main
-        cmd3 = [
-            "ffmpeg", "-y",
-            "-i", temp_bg,
-            "-i", temp_main,
-            "-i", main_path,
-            "-filter_complex", f"[0:v][1:v]overlay=(W-w)/2:(H-h)/2:shortest=1[outv]",
-            "-map", "[outv]",
-            "-map", "2:a?",
-            "-t", str(duration),
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
-            "-c:a", "aac", "-b:a", "160k", "-ar", "44100", "-ac", "2",
-            "-shortest",
-            "-movflags", "+faststart",
-            "-pix_fmt", "yuv420p",
-            temp_out
-        ]
-        r3 = subprocess.run(cmd3, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=600, text=True)
-        if r3.returncode != 0 or not (os.path.exists(temp_out) and os.path.getsize(temp_out) > 5000):
-            print("compose final failed:", (r3.stderr or "")[-1200:], flush=True)
-            return False
-
-        shutil.move(temp_out, output_path)
-        ok = os.path.exists(output_path) and os.path.getsize(output_path) > 5000
-        print(f"compose success={ok} size={os.path.getsize(output_path) if ok else 0}", flush=True)
-        return ok
+        shutil.move(out_tmp, output_path)
+        print(f"[OV] SUCCESS size={os.path.getsize(output_path)}", flush=True)
+        return True
     except Exception as e:
-        print(f"compose_overlay_video exception: {e}", flush=True)
+        print(f"[OV] exception: {e}", flush=True)
         return False
     finally:
-        for f in [temp_main, temp_bg, temp_out]:
-            if f and os.path.exists(f):
-                try:
-                    os.remove(f)
-                except Exception:
-                    pass
+        if os.path.exists(out_tmp):
+            try:
+                os.remove(out_tmp)
+            except Exception:
+                pass
 
 
 def compress_video_if_needed(path: str, unique_id: str, max_mb: float = 45.0) -> str:
@@ -1456,6 +1456,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if success and os.path.exists(output_path) and get_overlay_on(user_id) and not is_channel:
                     bg = get_user_bg_path(user_id)
                     if bg:
+                        print(f"[OV] calling compose bg={bg} exists={os.path.exists(bg)} enhanced={output_path}", flush=True)
                         overlay_out = f"overlay_{unique_id}.mp4"
                         ok_ov = compose_overlay_video(bg, output_path, overlay_out)
                         if ok_ov and os.path.exists(overlay_out):
