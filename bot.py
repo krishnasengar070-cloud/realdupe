@@ -318,53 +318,9 @@ def get_user_mode(user_id: int) -> str:
 def set_user_mode(user_id: int, mode: str):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute("SELECT overlay FROM user_prefs WHERE user_id = ?", (user_id,))
-    row = c.fetchone()
-    overlay = row[0] if row else 0
-    c.execute("INSERT OR REPLACE INTO user_prefs (user_id, mode, overlay) VALUES (?, ?, ?)", (user_id, mode, overlay))
+    c.execute("INSERT OR REPLACE INTO user_prefs (user_id, mode) VALUES (?, ?)", (user_id, mode))
     conn.commit()
     conn.close()
-
-def get_overlay_on(user_id: int) -> bool:
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT overlay FROM user_prefs WHERE user_id = ?", (user_id,))
-    row = c.fetchone()
-    conn.close()
-    return bool(row and row[0])
-
-def set_overlay_on(user_id: int, on: bool):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT mode FROM user_prefs WHERE user_id = ?", (user_id,))
-    row = c.fetchone()
-    mode = row[0] if row else "normal"
-    c.execute("INSERT OR REPLACE INTO user_prefs (user_id, mode, overlay) VALUES (?, ?, ?)", (user_id, mode, 1 if on else 0))
-    conn.commit()
-    conn.close()
-
-def get_user_bg_path(user_id: int):
-    for ext in [".mp4", ".gif", ".png", ".jpg", ".jpeg", ".webp"]:
-        path = os.path.join(DATA_DIR, f"user_bg_{user_id}{ext}")
-        if os.path.exists(path) and os.path.getsize(path) > 100:
-            return path
-    return None
-
-def save_user_bg(user_id: int, source_path: str) -> str:
-    # remove old
-    for ext in [".mp4", ".gif", ".png", ".jpg", ".jpeg", ".webp"]:
-        old = os.path.join(DATA_DIR, f"user_bg_{user_id}{ext}")
-        if os.path.exists(old):
-            try:
-                os.remove(old)
-            except Exception:
-                pass
-    ext = os.path.splitext(source_path)[1].lower() or ".mp4"
-    if ext not in [".mp4", ".gif", ".png", ".jpg", ".jpeg", ".webp"]:
-        ext = ".mp4"
-    dest = os.path.join(DATA_DIR, f"user_bg_{user_id}{ext}")
-    shutil.copy(source_path, dest)
-    return dest
 
 # ------------------------------------------------------
 # Flask keep-alive
@@ -672,153 +628,6 @@ def _fallback_enhance(input_path: str, output_path: str, ss: float, t: float, mo
 
 
 
-def compose_overlay_video(bg_path: str, main_path: str, output_path: str) -> bool:
-    """3-step overlay: solid bg mp4 -> solid main mp4 with border -> simple overlay."""
-    print(f"[OV] start bg={bg_path!r} exists={os.path.exists(bg_path) if bg_path else False}", flush=True)
-    print(f"[OV] main={main_path!r} exists={os.path.exists(main_path) if main_path else False}", flush=True)
-    if not shutil.which("ffmpeg"):
-        print("[OV] no ffmpeg", flush=True)
-        return False
-    if not bg_path or not os.path.exists(bg_path):
-        print("[OV] bg file missing", flush=True)
-        return False
-    if not main_path or not os.path.exists(main_path):
-        print("[OV] main file missing", flush=True)
-        return False
-
-    duration = 5.0
-    try:
-        probe = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-             "-of", "default=noprint_wrappers=1:nokey=1", main_path],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30
-        )
-        if probe.stdout.strip():
-            duration = max(float(probe.stdout.strip()), 0.5)
-    except Exception as e:
-        print(f"[OV] probe err: {e}", flush=True)
-    # cap very long videos for railway CPU
-    duration = min(duration, 60.0)
-    print(f"[OV] duration={duration}", flush=True)
-
-    uid = str(int(time.time() * 1000))
-    bg_mp4 = f"ov_bg_{uid}.mp4"
-    main_mp4 = f"ov_fg_{uid}.mp4"
-    out_tmp = f"ov_out_{uid}.mp4"
-    W, H = 1080, 1920
-    mw, mh = 800, 1422
-
-    try:
-        # ---- STEP 1: background -> fixed length 1080x1920 mp4 ----
-        bg_ext = os.path.splitext(bg_path)[1].lower()
-        is_image = bg_ext in [".png", ".jpg", ".jpeg", ".webp"]
-        if is_image:
-            cmd_bg = [
-                "ffmpeg", "-y",
-                "-loop", "1",
-                "-i", bg_path,
-                "-t", f"{duration:.3f}",
-                "-vf", f"scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},setsar=1,fps=30,format=yuv420p",
-                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
-                "-pix_fmt", "yuv420p", "-an",
-                bg_mp4
-            ]
-        else:
-            # video or gif: loop input then trim
-            cmd_bg = [
-                "ffmpeg", "-y",
-                "-stream_loop", "50",
-                "-i", bg_path,
-                "-t", f"{duration:.3f}",
-                "-vf", f"scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},setsar=1,fps=30,format=yuv420p",
-                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
-                "-pix_fmt", "yuv420p", "-an",
-                bg_mp4
-            ]
-        print("[OV] step1 bg...", flush=True)
-        r = subprocess.run(cmd_bg, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300, text=True)
-        if r.returncode != 0 or not os.path.exists(bg_mp4) or os.path.getsize(bg_mp4) < 1000:
-            print("[OV] step1 FAIL", (r.stderr or "")[-800:], flush=True)
-            return False
-        print(f"[OV] step1 ok size={os.path.getsize(bg_mp4)}", flush=True)
-
-        # ---- STEP 2: main video scaled + white border ----
-        # force even dims; white border 8px
-        cmd_fg = [
-            "ffmpeg", "-y",
-            "-i", main_path,
-            "-t", f"{duration:.3f}",
-            "-vf", (
-                f"scale={mw}:{mh}:force_original_aspect_ratio=decrease,"
-                f"pad={mw}:{mh}:(ow-iw)/2:(oh-ih)/2:color=black,"
-                f"pad={mw+16}:{mh+16}:8:8:color=white,"
-                f"setsar=1,fps=30,format=yuv420p"
-            ),
-            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20",
-            "-pix_fmt", "yuv420p", "-an",
-            main_mp4
-        ]
-        print("[OV] step2 main...", flush=True)
-        r = subprocess.run(cmd_fg, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300, text=True)
-        if r.returncode != 0 or not os.path.exists(main_mp4) or os.path.getsize(main_mp4) < 1000:
-            print("[OV] step2 FAIL", (r.stderr or "")[-800:], flush=True)
-            return False
-        print(f"[OV] step2 ok size={os.path.getsize(main_mp4)}", flush=True)
-
-        # ---- STEP 3: overlay centered + audio from original main ----
-        cmd_out = [
-            "ffmpeg", "-y",
-            "-i", bg_mp4,
-            "-i", main_mp4,
-            "-i", main_path,
-            "-filter_complex", "[0:v][1:v]overlay=(W-w)/2:(H-h)/2:shortest=1[v]",
-            "-map", "[v]",
-            "-map", "2:a?",
-            "-t", f"{duration:.3f}",
-            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20",
-            "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
-            "-pix_fmt", "yuv420p",
-            "-movflags", "+faststart",
-            out_tmp
-        ]
-        print("[OV] step3 overlay...", flush=True)
-        r = subprocess.run(cmd_out, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300, text=True)
-        if r.returncode != 0 or not os.path.exists(out_tmp) or os.path.getsize(out_tmp) < 3000:
-            print("[OV] step3 with audio FAIL, try no-audio", (r.stderr or "")[-600:], flush=True)
-            cmd_out2 = [
-                "ffmpeg", "-y",
-                "-i", bg_mp4,
-                "-i", main_mp4,
-                "-filter_complex", "[0:v][1:v]overlay=(W-w)/2:(H-h)/2[v]",
-                "-map", "[v]",
-                "-t", f"{duration:.3f}",
-                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20",
-                "-an",
-                "-pix_fmt", "yuv420p",
-                "-movflags", "+faststart",
-                out_tmp
-            ]
-            r2 = subprocess.run(cmd_out2, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300, text=True)
-            if r2.returncode != 0 or not os.path.exists(out_tmp) or os.path.getsize(out_tmp) < 3000:
-                print("[OV] step3 FAIL", (r2.stderr or "")[-800:], flush=True)
-                return False
-
-        shutil.move(out_tmp, output_path)
-        sz = os.path.getsize(output_path)
-        print(f"[OV] SUCCESS size={sz}", flush=True)
-        return sz > 3000
-    except Exception as e:
-        print(f"[OV] exception: {e}", flush=True)
-        return False
-    finally:
-        for f in [bg_mp4, main_mp4, out_tmp]:
-            if f and os.path.exists(f):
-                try:
-                    os.remove(f)
-                except Exception:
-                    pass
-
-
 def compress_video_if_needed(path: str, unique_id: str, max_mb: float = 45.0) -> str:
     if not os.path.exists(path) or not shutil.which("ffmpeg"):
         return path
@@ -1068,7 +877,7 @@ def get_user_keyboard(username: str = None):
     keyboard = [
         [KeyboardButton("How to use"), KeyboardButton("About")],
         [KeyboardButton("Buy"), KeyboardButton("Help")],
-        [KeyboardButton("Yellow Mode"), KeyboardButton("Overlay Mode")],
+        [KeyboardButton("Yellow Mode")],
     ]
     if username and username.lower() == ADMIN_USERNAME.lower():
         keyboard.append([KeyboardButton("Status"), KeyboardButton("Free All")])
@@ -1291,32 +1100,6 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 image_bytes = await file.download_as_bytearray()
 
-                # Overlay Mode: save as background instead of normal enhance
-                if get_overlay_on(user_id) and not is_channel:
-                    unique_id = str(int(time.time() * 1000))
-                    tmp_bg = f"bg_upload_{unique_id}.jpg"
-                    try:
-                        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-                        image.save(tmp_bg, "JPEG", quality=95)
-                        save_user_bg(user_id, tmp_bg)
-                        await message.reply_text(
-                            "✅ Background saved.\n\n"
-                            "Now send any video you want on top of this background.\n"
-                            "Short GIF/video backgrounds will auto-loop to match the full video length.\n\n"
-                            "Press Overlay Mode again to turn this OFF."
-                        )
-                        try:
-                            await status_msg.delete()
-                        except Exception:
-                            pass
-                        return
-                    finally:
-                        if os.path.exists(tmp_bg):
-                            try:
-                                os.remove(tmp_bg)
-                            except Exception:
-                                pass
-
                 image = Image.open(io.BytesIO(image_bytes))
                 result = enhance_image(image, mode=mode)
                 output = io.BytesIO()
@@ -1452,57 +1235,11 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 file = await context.bot.get_file(target_obj.file_id)
                 await file.download_to_drive(input_path)
 
-                # Overlay ON + no background yet → treat this video/GIF as background
-                if get_overlay_on(user_id) and not is_channel:
-                    bg_existing = get_user_bg_path(user_id)
-                    if not bg_existing:
-                        save_user_bg(user_id, input_path)
-                        await message.reply_text(
-                            "✅ Background saved.\n\n"
-                            "Now send any video you want on top of this background.\n"
-                            "Short GIF/video backgrounds will auto-loop to match the full video length.\n"
-                            "Send another image/GIF/video anytime to replace the background.\n\n"
-                            "Press Overlay Mode again to turn this OFF."
-                        )
-                        try:
-                            await status_msg.delete()
-                        except Exception:
-                            pass
-                        for pth in [input_path, output_path]:
-                            if os.path.exists(pth):
-                                try:
-                                    os.remove(pth)
-                                except Exception:
-                                    pass
-                        return
-
                 success = enhance_video(input_path, output_path, mode=mode)
 
                 caption = "✅ Here’s your modified video"
                 if mode == "mirror_yellow":
                     caption = "✅ Yellow Mode + Silver Border applied"
-
-                # Overlay Mode: put enhanced video on saved background
-                if success and os.path.exists(output_path) and get_overlay_on(user_id) and not is_channel:
-                    bg = get_user_bg_path(user_id)
-                    if bg:
-                        print(f"[OV] calling compose bg={bg} exists={os.path.exists(bg)} enhanced={output_path}", flush=True)
-                        overlay_out = f"overlay_{unique_id}.mp4"
-                        ok_ov = compose_overlay_video(bg, output_path, overlay_out)
-                        if ok_ov and os.path.exists(overlay_out):
-                            try:
-                                os.remove(output_path)
-                            except Exception:
-                                pass
-                            output_path = overlay_out
-                            caption = "✅ Overlay Mode + lightning border applied"
-                        else:
-                            await status_msg.edit_text("❌ Overlay failed. Sending normal processed video.")
-                    else:
-                        await message.reply_text(
-                            "⚠️ Overlay Mode is ON but no background is set.\n"
-                            "Send an image or GIF first to set the background."
-                        )
 
                 if success and os.path.exists(output_path):
                     ok = await safe_send_video(
@@ -1589,51 +1326,6 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         pass
 
 
-# ------------------------------------------------------
-# Animation / GIF handler (for Overlay background)
-# ------------------------------------------------------
-async def handle_animation(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.effective_message or update.message
-    if not message or not message.animation:
-        return
-    user = update.effective_user
-    if not user:
-        return
-    user_id = user.id
-    if not get_overlay_on(user_id):
-        await message.reply_text(
-            "GIF received. Turn ON Overlay Mode first, then send a GIF/image to set it as background."
-        )
-        return
-    status_msg = await message.reply_text("⌛ Saving background...")
-    unique_id = str(int(time.time() * 1000))
-    path = f"bg_anim_{unique_id}.mp4"
-    try:
-        file = await context.bot.get_file(message.animation.file_id)
-        await file.download_to_drive(path)
-        save_user_bg(user_id, path)
-        await message.reply_text(
-            "✅ Background saved.\n\n"
-            "Now send any video you want on top of this background.\n"
-            "This GIF will auto-loop to match the full video length.\n\n"
-            "Press Overlay Mode again to turn this OFF."
-        )
-        try:
-            await status_msg.delete()
-        except Exception:
-            pass
-    except Exception as e:
-        print(f"animation bg error: {e}", flush=True)
-        try:
-            await status_msg.edit_text("❌ Failed to save GIF background.")
-        except Exception:
-            pass
-    finally:
-        if os.path.exists(path):
-            try:
-                os.remove(path)
-            except Exception:
-                pass
 
 # ------------------------------------------------------
 # Instagram Download
@@ -2134,35 +1826,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         return
 
-    if text == "Overlay Mode":
-        on = get_overlay_on(user_id)
-        bg = get_user_bg_path(user_id)
-        if on:
-            set_overlay_on(user_id, False)
-            await message.reply_text(
-                "Overlay Mode OFF.\n"
-                "Videos will process normally again.\n"
-                "Press Overlay Mode anytime to turn it back on."
-            )
-        else:
-            set_overlay_on(user_id, True)
-            if bg:
-                await message.reply_text(
-                    "Overlay Mode ON ✅\n\n"
-                    "Background is already saved.\n\n"
-                    "• Send any video → it will be placed on top of your background (9:16 + border).\n"
-                    "• Short background GIF/video will auto-loop for the full video length.\n"
-                    "• Send a new image/GIF/video to replace the background.\n\n"
-                    "Press Overlay Mode again to turn it OFF."
-                )
-            else:
-                await message.reply_text(
-                    "Overlay Mode ON ✅\n\n"
-                    "Send an image, GIF, or short video now — I will save it as your background.\n\n"
-                    "After it is saved, send any video and I will place it on top of that background.\n"
-                    "Press Overlay Mode again to turn it OFF."
-                )
-        return
 
     if not text.startswith("http"):
         await message.reply_text(
@@ -2350,7 +2013,6 @@ def main():
 
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_image))
     app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video))
-    app.add_handler(MessageHandler(filters.ANIMATION, handle_animation))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     app.add_handler(MessageHandler(filters.Chat(CHANNEL_ID) & (filters.PHOTO | filters.Document.IMAGE), handle_image))
