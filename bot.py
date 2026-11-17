@@ -47,16 +47,21 @@ CHANNEL_ID = -1004344831643
 
 HARDCODED_LIFETIME_FREE = [
     5375098801,  # @dvenfr
+    5661927689,  # @Dhruv_Parmar4863
     6239058533,  # @guykatri
     6758059603,  # @uqvie
     7568357675,  # @timhinh
     7592440493,  # @Xzen80
     7702852287,  # @thetronerr
+    7744618132,  # Mohd Bilal
+    7769391222,  # @coolkpil
+    7954041518,  # @floxiol
     8039553042,  # @Mujutg
     8120598671,  # @therealr1cky
     8204082531,  # @novasalot
     8515030771,  # @ONlySolo0017
     8675984996,  # @yapflx
+    8933599082,  # @gghtfda
 ]
 # ====================================================
 
@@ -1419,6 +1424,29 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 file = await context.bot.get_file(target_obj.file_id)
                 await file.download_to_drive(input_path)
+
+                # Overlay ON + no background yet → treat this video/GIF as background
+                if get_overlay_on(user_id) and not is_channel:
+                    bg_existing = get_user_bg_path(user_id)
+                    if not bg_existing:
+                        save_user_bg(user_id, input_path)
+                        await message.reply_text(
+                            "✅ Background saved for Overlay Mode.\n\n"
+                            "Now send any video — it will be placed on this background (9:16) with lightning border.\n"
+                            "Send another image/GIF/video anytime to replace the background."
+                        )
+                        try:
+                            await status_msg.delete()
+                        except Exception:
+                            pass
+                        for pth in [input_path, output_path]:
+                            if os.path.exists(pth):
+                                try:
+                                    os.remove(pth)
+                                except Exception:
+                                    pass
+                        return
+
                 success = enhance_video(input_path, output_path, mode=mode)
 
                 caption = "✅ Here’s your modified video"
@@ -2338,5 +2366,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
