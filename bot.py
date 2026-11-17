@@ -160,9 +160,14 @@ def init_db():
     c.execute("""
         CREATE TABLE IF NOT EXISTS user_prefs (
             user_id INTEGER PRIMARY KEY,
-            mode TEXT DEFAULT 'normal'
+            mode TEXT DEFAULT 'normal',
+            overlay INTEGER DEFAULT 0
         )
     """)
+    try:
+        c.execute("ALTER TABLE user_prefs ADD COLUMN overlay INTEGER DEFAULT 0")
+    except Exception:
+        pass
     c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('global_free', '0')")
     conn.commit()
     conn.close()
@@ -308,9 +313,53 @@ def get_user_mode(user_id: int) -> str:
 def set_user_mode(user_id: int, mode: str):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO user_prefs (user_id, mode) VALUES (?, ?)", (user_id, mode))
+    c.execute("SELECT overlay FROM user_prefs WHERE user_id = ?", (user_id,))
+    row = c.fetchone()
+    overlay = row[0] if row else 0
+    c.execute("INSERT OR REPLACE INTO user_prefs (user_id, mode, overlay) VALUES (?, ?, ?)", (user_id, mode, overlay))
     conn.commit()
     conn.close()
+
+def get_overlay_on(user_id: int) -> bool:
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT overlay FROM user_prefs WHERE user_id = ?", (user_id,))
+    row = c.fetchone()
+    conn.close()
+    return bool(row and row[0])
+
+def set_overlay_on(user_id: int, on: bool):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT mode FROM user_prefs WHERE user_id = ?", (user_id,))
+    row = c.fetchone()
+    mode = row[0] if row else "normal"
+    c.execute("INSERT OR REPLACE INTO user_prefs (user_id, mode, overlay) VALUES (?, ?, ?)", (user_id, mode, 1 if on else 0))
+    conn.commit()
+    conn.close()
+
+def get_user_bg_path(user_id: int):
+    for ext in [".mp4", ".gif", ".png", ".jpg", ".jpeg", ".webp"]:
+        path = os.path.join(DATA_DIR, f"user_bg_{user_id}{ext}")
+        if os.path.exists(path) and os.path.getsize(path) > 100:
+            return path
+    return None
+
+def save_user_bg(user_id: int, source_path: str) -> str:
+    # remove old
+    for ext in [".mp4", ".gif", ".png", ".jpg", ".jpeg", ".webp"]:
+        old = os.path.join(DATA_DIR, f"user_bg_{user_id}{ext}")
+        if os.path.exists(old):
+            try:
+                os.remove(old)
+            except Exception:
+                pass
+    ext = os.path.splitext(source_path)[1].lower() or ".mp4"
+    if ext not in [".mp4", ".gif", ".png", ".jpg", ".jpeg", ".webp"]:
+        ext = ".mp4"
+    dest = os.path.join(DATA_DIR, f"user_bg_{user_id}{ext}")
+    shutil.copy(source_path, dest)
+    return dest
 
 # ------------------------------------------------------
 # Flask keep-alive
@@ -614,6 +663,132 @@ def _fallback_enhance(input_path: str, output_path: str, ss: float, t: float, mo
     except Exception:
         return False
 
+
+def compose_overlay_video(bg_path: str, main_path: str, output_path: str) -> bool:
+    """Place enhanced main video centered on 9:16 background with lightning-style glow border."""
+    if not shutil.which("ffmpeg"):
+        return False
+    duration = 5.0
+    try:
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", main_path],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30
+        )
+        if probe.stdout.strip():
+            duration = max(float(probe.stdout.strip()), 0.5)
+    except Exception:
+        pass
+
+    unique_id = str(int(time.time() * 1000))
+    temp_main = f"ov_main_{unique_id}.mp4"
+    temp_out = f"ov_tmp_{unique_id}.mp4"
+
+    # main video size inside 1080x1920 — comfortably visible (~72% width)
+    mw, mh = 780, 1386
+
+    try:
+        # prepare main: scale + lightning glow border
+        # white soft glow ring around the video
+        vf_main = (
+            f"scale={mw}:{mh}:force_original_aspect_ratio=decrease,"
+            f"pad={mw}:{mh}:(ow-iw)/2:(oh-ih)/2:color=black,"
+            f"setsar=1,"
+            f"format=rgba,"
+            f"split[base][g];"
+            f"[g]drawbox=0:0:iw:ih:color=white@0.95:t=10,boxblur=12:2[glow];"
+            f"[base][glow]overlay=0:0,"
+            f"drawbox=0:0:iw:ih:color=0xAADDFF@0.85:t=4,"
+            f"format=yuv420p"
+        )
+        cmd_main = [
+            "ffmpeg", "-y", "-i", main_path,
+            "-vf", vf_main,
+            "-an",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+            "-pix_fmt", "yuv420p",
+            temp_main
+        ]
+        r1 = subprocess.run(cmd_main, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300, text=True)
+        if r1.returncode != 0 or not os.path.exists(temp_main):
+            print("overlay main prep failed:", (r1.stderr or "")[-800:], flush=True)
+            return False
+
+        bg_ext = os.path.splitext(bg_path)[1].lower()
+        is_image = bg_ext in [".png", ".jpg", ".jpeg", ".webp"]
+        is_gif = bg_ext == ".gif"
+
+        # background → 1080x1920, looped for duration
+        if is_image:
+            bg_input = ["-loop", "1", "-t", str(duration + 0.3), "-i", bg_path]
+        elif is_gif:
+            bg_input = ["-ignore_loop", "0", "-i", bg_path]
+        else:
+            bg_input = ["-stream_loop", "-1", "-i", bg_path]
+
+        filter_complex = (
+            f"[0:v]scale=1080:1920:force_original_aspect_ratio=increase,"
+            f"crop=1080:1920,setsar=1,fps=30[bg];"
+            f"[1:v]scale={mw}:{mh}:force_original_aspect_ratio=decrease,"
+            f"pad={mw}:{mh}:(ow-iw)/2:(oh-ih)/2:color=0x00000000,setsar=1[fg];"
+            f"[bg][fg]overlay=(W-w)/2:(H-h)/2:shortest=1[out]"
+        )
+
+        cmd = [
+            "ffmpeg", "-y",
+            *bg_input,
+            "-i", temp_main,
+            "-filter_complex", filter_complex,
+            "-map", "[out]",
+            "-map", "1:a?",
+            "-t", str(duration),
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+            "-c:a", "aac", "-b:a", "160k", "-ar", "44100", "-ac", "2",
+            "-movflags", "+faststart",
+            "-pix_fmt", "yuv420p",
+            temp_out
+        ]
+        # audio from original main
+        cmd = [
+            "ffmpeg", "-y",
+            *bg_input,
+            "-i", temp_main,
+            "-i", main_path,
+            "-filter_complex",
+            (
+                f"[0:v]scale=1080:1920:force_original_aspect_ratio=increase,"
+                f"crop=1080:1920,setsar=1,fps=30[bg];"
+                f"[1:v]format=yuv420p[fg];"
+                f"[bg][fg]overlay=(W-w)/2:(H-h)/2:shortest=1[out]"
+            ),
+            "-map", "[out]",
+            "-map", "2:a?",
+            "-t", str(duration),
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+            "-c:a", "aac", "-b:a", "160k", "-ar", "44100", "-ac", "2",
+            "-shortest",
+            "-movflags", "+faststart",
+            "-pix_fmt", "yuv420p",
+            temp_out
+        ]
+        r2 = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=600, text=True)
+        if r2.returncode != 0 or not (os.path.exists(temp_out) and os.path.getsize(temp_out) > 10000):
+            print("overlay compose failed:", (r2.stderr or "")[-1200:], flush=True)
+            return False
+        shutil.move(temp_out, output_path)
+        return os.path.exists(output_path) and os.path.getsize(output_path) > 10000
+    except Exception as e:
+        print(f"compose_overlay_video error: {e}", flush=True)
+        return False
+    finally:
+        for f in [temp_main, temp_out]:
+            if f and os.path.exists(f):
+                try:
+                    os.remove(f)
+                except Exception:
+                    pass
+
+
 def compress_video_if_needed(path: str, unique_id: str, max_mb: float = 45.0) -> str:
     if not os.path.exists(path) or not shutil.which("ffmpeg"):
         return path
@@ -863,7 +1038,7 @@ def get_user_keyboard(username: str = None):
     keyboard = [
         [KeyboardButton("How to use"), KeyboardButton("About")],
         [KeyboardButton("Buy"), KeyboardButton("Help")],
-        [KeyboardButton("Yellow Mode")],
+        [KeyboardButton("Yellow Mode"), KeyboardButton("Overlay Mode")],
     ]
     if username and username.lower() == ADMIN_USERNAME.lower():
         keyboard.append([KeyboardButton("Status"), KeyboardButton("Free All")])
@@ -1085,6 +1260,31 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     return
 
                 image_bytes = await file.download_as_bytearray()
+
+                # Overlay Mode: save as background instead of normal enhance
+                if get_overlay_on(user_id) and not is_channel:
+                    unique_id = str(int(time.time() * 1000))
+                    tmp_bg = f"bg_upload_{unique_id}.jpg"
+                    try:
+                        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+                        image.save(tmp_bg, "JPEG", quality=95)
+                        save_user_bg(user_id, tmp_bg)
+                        await message.reply_text(
+                            "✅ Background saved for Overlay Mode.\n\n"
+                            "Now send any video — it will be placed on this background (9:16) with lightning border."
+                        )
+                        try:
+                            await status_msg.delete()
+                        except Exception:
+                            pass
+                        return
+                    finally:
+                        if os.path.exists(tmp_bg):
+                            try:
+                                os.remove(tmp_bg)
+                            except Exception:
+                                pass
+
                 image = Image.open(io.BytesIO(image_bytes))
                 result = enhance_image(image, mode=mode)
                 output = io.BytesIO()
@@ -1225,6 +1425,27 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if mode == "mirror_yellow":
                     caption = "✅ Yellow Mode + Silver Border applied"
 
+                # Overlay Mode: put enhanced video on saved background
+                if success and os.path.exists(output_path) and get_overlay_on(user_id) and not is_channel:
+                    bg = get_user_bg_path(user_id)
+                    if bg:
+                        overlay_out = f"overlay_{unique_id}.mp4"
+                        ok_ov = compose_overlay_video(bg, output_path, overlay_out)
+                        if ok_ov and os.path.exists(overlay_out):
+                            try:
+                                os.remove(output_path)
+                            except Exception:
+                                pass
+                            output_path = overlay_out
+                            caption = "✅ Overlay Mode + lightning border applied"
+                        else:
+                            await status_msg.edit_text("❌ Overlay failed. Sending normal processed video.")
+                    else:
+                        await message.reply_text(
+                            "⚠️ Overlay Mode is ON but no background is set.\n"
+                            "Send an image or GIF first to set the background."
+                        )
+
                 if success and os.path.exists(output_path):
                     ok = await safe_send_video(
                         message, output_path, caption, unique_id, 
@@ -1262,7 +1483,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         except Exception:
                             pass
                 for f in os.listdir("."):
-                    if f.startswith(f"comp_{unique_id}") or f.startswith(f"texture_{unique_id}") or f.startswith(f"temp_vid_{unique_id}"):
+                    if f.startswith(f"comp_{unique_id}") or f.startswith(f"texture_{unique_id}") or f.startswith(f"temp_vid_{unique_id}") or f.startswith(f"overlay_{unique_id}") or f.startswith(f"ov_"):
                         try:
                             os.remove(f)
                         except Exception:
@@ -1308,6 +1529,51 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         os.remove(p)
                     except Exception:
                         pass
+
+
+# ------------------------------------------------------
+# Animation / GIF handler (for Overlay background)
+# ------------------------------------------------------
+async def handle_animation(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.effective_message or update.message
+    if not message or not message.animation:
+        return
+    user = update.effective_user
+    if not user:
+        return
+    user_id = user.id
+    if not get_overlay_on(user_id):
+        await message.reply_text(
+            "GIF received. Turn ON Overlay Mode first, then send a GIF/image to set it as background."
+        )
+        return
+    status_msg = await message.reply_text("⌛ Saving background...")
+    unique_id = str(int(time.time() * 1000))
+    path = f"bg_anim_{unique_id}.mp4"
+    try:
+        file = await context.bot.get_file(message.animation.file_id)
+        await file.download_to_drive(path)
+        save_user_bg(user_id, path)
+        await message.reply_text(
+            "✅ GIF background saved for Overlay Mode.\n\n"
+            "Now send any video — it will be placed on this looping background (9:16) with lightning border."
+        )
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
+    except Exception as e:
+        print(f"animation bg error: {e}", flush=True)
+        try:
+            await status_msg.edit_text("❌ Failed to save GIF background.")
+        except Exception:
+            pass
+    finally:
+        if os.path.exists(path):
+            try:
+                os.remove(path)
+            except Exception:
+                pass
 
 # ------------------------------------------------------
 # Instagram Download
@@ -1808,6 +2074,34 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         return
 
+    if text == "Overlay Mode":
+        on = get_overlay_on(user_id)
+        bg = get_user_bg_path(user_id)
+        if on:
+            set_overlay_on(user_id, False)
+            await message.reply_text(
+                "Overlay Mode OFF.\n"
+                "Videos will process normally again."
+            )
+        else:
+            set_overlay_on(user_id, True)
+            if bg:
+                await message.reply_text(
+                    "Overlay Mode ON ✅\n\n"
+                    "Background is already set.\n"
+                    "• Send any video → it will be placed on your background (9:16) with lightning border.\n"
+                    "• Send a new image/GIF anytime to replace the background.\n\n"
+                    "Press Overlay Mode again to turn it off."
+                )
+            else:
+                await message.reply_text(
+                    "Overlay Mode ON ✅\n\n"
+                    "Now send an image or GIF — it will be saved as your background.\n"
+                    "After that, every video you send will be overlaid on that background (Reel 9:16 + lightning border).\n\n"
+                    "Press Overlay Mode again to turn it off."
+                )
+        return
+
     if not text.startswith("http"):
         await message.reply_text(
             "About this Bot:\n\n"
@@ -1994,6 +2288,7 @@ def main():
 
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_image))
     app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video))
+    app.add_handler(MessageHandler(filters.ANIMATION, handle_animation))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     app.add_handler(MessageHandler(filters.Chat(CHANNEL_ID) & (filters.PHOTO | filters.Document.IMAGE), handle_image))
@@ -2043,3 +2338,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
