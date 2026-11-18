@@ -46,6 +46,8 @@ LIFETIME_FREE_FILE = os.path.join(DATA_DIR, "lifetime_free.json")
 CHANNEL_ID = -1004344831643
 
 HARDCODED_LIFETIME_FREE = [
+    1191965805,  # @eattie
+    1648712789,  # @NotAyte
     5375098801,  # @dvenfr
     5661927689,  # @Dhruv_Parmar4863
     6239058533,  # @guykatri
@@ -62,7 +64,6 @@ HARDCODED_LIFETIME_FREE = [
     8515030771,  # @ONlySolo0017
     8675984996,  # @yapflx
     8933599082,  # @gghtfda
-    1648712789,  # permanent free
 ]
 # ====================================================
 
@@ -166,14 +167,9 @@ def init_db():
     c.execute("""
         CREATE TABLE IF NOT EXISTS user_prefs (
             user_id INTEGER PRIMARY KEY,
-            mode TEXT DEFAULT 'normal',
-            overlay INTEGER DEFAULT 0
+            mode TEXT DEFAULT 'normal'
         )
     """)
-    try:
-        c.execute("ALTER TABLE user_prefs ADD COLUMN overlay INTEGER DEFAULT 0")
-    except Exception:
-        pass
     c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('global_free', '0')")
     conn.commit()
     conn.close()
@@ -624,10 +620,6 @@ def _fallback_enhance(input_path: str, output_path: str, ss: float, t: float, mo
         return r.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 10000
     except Exception:
         return False
-
-
-
-
 
 def compress_video_if_needed(path: str, unique_id: str, max_mb: float = 45.0) -> str:
     if not os.path.exists(path) or not shutil.which("ffmpeg"):
@@ -1100,7 +1092,6 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     return
 
                 image_bytes = await file.download_as_bytearray()
-
                 image = Image.open(io.BytesIO(image_bytes))
                 result = enhance_image(image, mode=mode)
                 output = io.BytesIO()
@@ -1235,7 +1226,6 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 file = await context.bot.get_file(target_obj.file_id)
                 await file.download_to_drive(input_path)
-
                 success = enhance_video(input_path, output_path, mode=mode)
 
                 caption = "✅ Here’s your modified video"
@@ -1279,7 +1269,7 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         except Exception:
                             pass
                 for f in os.listdir("."):
-                    if f.startswith(f"comp_{unique_id}") or f.startswith(f"texture_{unique_id}") or f.startswith(f"temp_vid_{unique_id}") or f.startswith(f"overlay_{unique_id}") or f.startswith(f"ov_"):
+                    if f.startswith(f"comp_{unique_id}") or f.startswith(f"texture_{unique_id}") or f.startswith(f"temp_vid_{unique_id}"):
                         try:
                             os.remove(f)
                         except Exception:
@@ -1325,8 +1315,6 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         os.remove(p)
                     except Exception:
                         pass
-
-
 
 # ------------------------------------------------------
 # Instagram Download
@@ -1827,7 +1815,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         return
 
-
     if not text.startswith("http"):
         await message.reply_text(
             "About this Bot:\n\n"
@@ -1996,10 +1983,9 @@ def main():
         Application.builder()
         .token(BOT_TOKEN)
         .connect_timeout(60.0)
-        .read_timeout(180.0)
-        .write_timeout(180.0)
+        .read_timeout(120.0)
+        .write_timeout(120.0)
         .pool_timeout(60.0)
-        .get_updates_read_timeout(60.0)
         .build()
     )
     app.add_handler(CommandHandler("start", start))
@@ -2057,21 +2043,10 @@ def main():
     print("Bot started successfully...", flush=True)
     print(f"Channel mode active for ID: {CHANNEL_ID}", flush=True)
     print(f"Hardcoded lifetime free: {HARDCODED_LIFETIME_FREE}", flush=True)
-
-    # Restart loop: if polling dies (network blip / transient error), wait and start again
-    while True:
-        try:
-            app.run_polling(
-                drop_pending_updates=True,
-                allowed_updates=["message", "channel_post", "edited_channel_post"],
-                close_loop=False,
-            )
-        except Exception as e:
-            print(f"[RESTART] polling stopped: {e}", flush=True)
-            time.sleep(5)
-            print("[RESTART] starting polling again...", flush=True)
-            continue
-        break
+    app.run_polling(
+        drop_pending_updates=True,
+        allowed_updates=["message", "channel_post", "edited_channel_post"]
+    )
 
 if __name__ == "__main__":
     main()
